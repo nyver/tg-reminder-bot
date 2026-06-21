@@ -23,7 +23,15 @@ nlu:
     # model: mistralai/mistral-small
 
 providers:
-  tv_api_base_url: ""
+  tv:
+    # EPG Service API v1: https://epgservice.ru/en/docs/
+    # Корневой URL API без завершающего слеша.
+    base_url: https://api.epgservice.ru
+    # Bearer-токен. Если значение пустое, TV-провайдер отключён.
+    # Можно задать напрямую или через EPG_SERVICE_API_KEY.
+    api_key: "${EPG_SERVICE_API_KEY}"
+    # Общий timeout одного HTTP-запроса к индексу или расписанию.
+    timeout: 15s
   price:
     user_agent: remind-bot/1.0
     headless: false

@@ -45,9 +45,15 @@ type OpenRouterConfig struct {
 }
 
 type ProvidersConfig struct {
-	TVAPIBaseURL string       `yaml:"tv_api_base_url"`
-	Price        PriceConfig  `yaml:"price"`
-	Travel       TravelConfig `yaml:"travel"`
+	TV     TVConfig     `yaml:"tv"`
+	Price  PriceConfig  `yaml:"price"`
+	Travel TravelConfig `yaml:"travel"`
+}
+
+type TVConfig struct {
+	BaseURL string        `yaml:"base_url"`
+	APIKey  string        `yaml:"api_key"`
+	Timeout time.Duration `yaml:"timeout"`
 }
 
 type PriceConfig struct {
@@ -134,6 +140,10 @@ func defaults() *Config {
 			},
 		},
 		Providers: ProvidersConfig{
+			TV: TVConfig{
+				BaseURL: "https://api.epgservice.ru",
+				Timeout: 15 * time.Second,
+			},
 			Price: PriceConfig{
 				UserAgent: "remind-bot/1.0",
 			},
@@ -161,6 +171,12 @@ func applyEnvOverrides(cfg *Config) {
 	}
 	if v := os.Getenv("LLM_API_KEY"); v != "" {
 		cfg.NLU.APIKey = v
+	}
+	if v := os.Getenv("EPG_SERVICE_API_KEY"); v != "" {
+		cfg.Providers.TV.APIKey = v
+	}
+	if v := os.Getenv("EPG_SERVICE_BASE_URL"); v != "" {
+		cfg.Providers.TV.BaseURL = v
 	}
 	if v := os.Getenv("DATABASE_DSN"); v != "" {
 		cfg.Database.DSN = v

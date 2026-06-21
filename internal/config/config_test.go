@@ -15,6 +15,8 @@ func TestLoadYAMLUsesSQLiteDefaults(t *testing.T) {
 	t.Setenv("DATABASE_URL", "")
 	t.Setenv("DATABASE_DRIVER", "")
 	t.Setenv("DATABASE_DSN", "")
+	t.Setenv("EPG_SERVICE_API_KEY", "")
+	t.Setenv("EPG_SERVICE_BASE_URL", "")
 
 	cfg, err := Load()
 	if err != nil {
@@ -22,6 +24,9 @@ func TestLoadYAMLUsesSQLiteDefaults(t *testing.T) {
 	}
 	if cfg.Database.Driver != "sqlite" || cfg.Database.DSN != "./data/remind.db" {
 		t.Fatalf("unexpected database config: %+v", cfg.Database)
+	}
+	if cfg.Providers.TV.BaseURL != "https://api.epgservice.ru" || cfg.Providers.TV.Timeout == 0 {
+		t.Fatalf("unexpected TV config: %+v", cfg.Providers.TV)
 	}
 }
 

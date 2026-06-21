@@ -51,7 +51,11 @@ func main() {
 
 	// Wire providers.
 	registry := provider.NewRegistry()
-	registry.RegisterEvent(tvschedule.New(cfg.Providers.TVAPIBaseURL, log))
+	registry.RegisterEvent(tvschedule.New(tvschedule.Config{
+		BaseURL: cfg.Providers.TV.BaseURL,
+		APIKey:  cfg.Providers.TV.APIKey,
+		Timeout: cfg.Providers.TV.Timeout,
+	}, log))
 	registry.RegisterMetric(price.New(cfg.Providers.Price.UserAgent, cfg.Providers.Travel.Timeout, log))
 
 	airP := travel.NewAirProvider(cfg.Providers.Travel.AirAPIKey, log)

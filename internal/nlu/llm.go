@@ -190,7 +190,7 @@ JSON-схема ответа:
 Правила:
 - «напомни завтра в 9:00 текст» → kind=absolute, fire_at=RFC3339
 - «каждый день в 9:00» → kind=recurring, eval_cron="0 9 * * *"
-- «за 3 часа до КВН на Первом» → kind=conditional, trigger=anchor, event.type=tv_program
+- «за 3 часа до КВН на Первом» → kind=conditional, trigger=anchor, event.type=tv_program, event.params.channel="Первый канал"
 - «уведоми при снижении цены» + URL → kind=conditional, trigger=threshold, event.type=price, event.params.url=<URL>
 - «5 дешёвых билетов СПб→Калининград» → kind=conditional, trigger=digest, event.type=travel
 - horizon_days: «неделя»→7, «месяц»→30, «2 недели»→14, «45 дней»→45, default→30

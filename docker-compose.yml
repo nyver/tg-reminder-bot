@@ -8,14 +8,18 @@ x-app: &app
       VERSION: ${VERSION:-dev}
   image: remind:local
   environment:
+    CONFIG_FILE: /app/config.yaml
     TELEGRAM_TOKEN: ${TELEGRAM_TOKEN:-}
     LLM_API_KEY: ${LLM_API_KEY:-}
+    EPG_SERVICE_API_KEY: ${EPG_SERVICE_API_KEY:-}
+    EPG_SERVICE_BASE_URL: ${EPG_SERVICE_BASE_URL:-}
     LOG_LEVEL: ${LOG_LEVEL:-info}
     DATABASE_DRIVER: ${DATABASE_DRIVER:-sqlite}
     DATABASE_DSN: ${DATABASE_DSN:-/data/remind.db}
     DATABASE_URL: ${DATABASE_URL:-}
   volumes:
     - reminddata:/data
+    - ./config.yaml:/app/config.yaml:ro
   restart: unless-stopped
 
 services:

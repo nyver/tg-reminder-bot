@@ -52,6 +52,7 @@ ID для команд `/cancel`, `/remove`, `/pause` и `/resume` можно п
 Требуются Docker и Docker Compose.
 
 ```bash
+cp config.yaml.example config.yaml
 cp .env.example .env
 ```
 
@@ -110,8 +111,13 @@ docker compose down -v
 - `scheduler` — интервалы фоновых задач;
 - `server` — порт API, worker ID и уровень логирования.
 
-Docker-образ содержит рабочий `/app/config.yaml` с безопасными значениями по
-умолчанию. Для собственного YAML добавьте read-only mount в `x-app.volumes`:
+TV-провайдер интегрирован с [EPG Service API](https://epgservice.ru/en/docs/).
+Он разрешает название канала через `/v1/index`, загружает недельное расписание
+из `/v1/schedule/{channel_id}` и ищет передачу в заданном временном окне.
+
+Docker-образ содержит резервный `/app/config.yaml` с безопасными значениями по
+умолчанию. Docker Compose монтирует локальный `config.yaml` поверх него в режиме
+read-only:
 
 ```yaml
 volumes:
@@ -119,16 +125,64 @@ volumes:
   - ./config.yaml:/app/config.yaml:ro
 ```
 
+Поэтому перед первым запуском Compose создайте `config.yaml` из примера. Секреты
+можно хранить в нём или передавать через `.env`; непустые переменные окружения
+имеют приоритет над YAML.
+
 Секреты и deployment-настройки можно переопределять переменными окружения:
 
 | Переменная | Назначение |
 | --- | --- |
 | `TELEGRAM_TOKEN` | токен Telegram-бота |
 | `LLM_API_KEY` | ключ OpenRouter или Anthropic |
+| `EPG_SERVICE_API_KEY` | Bearer-токен EPG Service |
+| `EPG_SERVICE_BASE_URL` | переопределение корневого URL EPG Service API |
 | `DATABASE_DRIVER` | `sqlite` или `postgres` |
 | `DATABASE_DSN` | путь SQLite или PostgreSQL DSN |
 | `DATABASE_URL` | PostgreSQL URL с наивысшим приоритетом |
 | `LOG_LEVEL` | `debug`, `info`, `warn` или `error` |
+
+## TV API
+
+Получите Bearer-токен EPG Service и задайте `EPG_SERVICE_API_KEY`. Настройки
+провайдера находятся в YAML:
+
+```yaml
+providers:
+  tv:
+    base_url: https://api.epgservice.ru
+    api_key: "${EPG_SERVICE_API_KEY}"
+    timeout: 15s
+```
+
+Поля секции `providers.tv`:
+
+| Поле | Описание | Значение по умолчанию |
+| --- | --- | --- |
+| `base_url` | корневой URL EPG Service API без завершающего `/` | `https://api.epgservice.ru` |
+| `api_key` | Bearer-токен для запросов к API | пустое значение |
+| `timeout` | максимальная длительность одного HTTP-запроса | `15s` |
+
+При пустом `api_key` TV-провайдер отключён: worker продолжает работу, но не
+создаёт уведомления по телепрограмме. `EPG_SERVICE_API_KEY` переопределяет ключ
+из YAML, а `EPG_SERVICE_BASE_URL` — `providers.tv.base_url`.
+
+Провайдер кэширует индекс каналов на один час. Расписание запрашивается отдельно
+для каждой недели, попавшей во временное окно напоминания.
+
+Для TV-напоминания NLU формирует параметры `channel` и название передачи:
+
+```json
+{
+  "type": "tv_program",
+  "title": "КВН",
+  "params": {"channel": "Первый канал"}
+}
+```
+
+Если ID канала уже известен, вместо поиска по названию можно передать
+`params.channel_id`. Поле `params.channel` используется для поиска канала по
+названию через `/v1/index`; необходимо указать хотя бы одно из этих полей.
 
 ## LLM-провайдер
 
