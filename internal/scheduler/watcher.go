@@ -101,8 +101,13 @@ func (w *Watcher) processReminder(ctx context.Context, rem domain.Reminder) {
 		}
 	}
 
-	// Advance next evaluation time.
-	_ = w.reminders.UpdateNextEval(ctx, rem.ID, nextEval(rem))
+	// Advance recurring/conditional reminders; finish one-shot reminders.
+	next := nextEval(rem)
+	if next == nil {
+		_ = w.reminders.UpdateStatus(ctx, rem.ID, domain.StatusDone)
+		return
+	}
+	_ = w.reminders.UpdateNextEval(ctx, rem.ID, next)
 }
 
 // nextEval computes the next watcher evaluation time from the cron expression.
@@ -116,7 +121,11 @@ func nextEval(rem domain.Reminder) *time.Time {
 	if err != nil {
 		return nil
 	}
-	next := schedule.Next(time.Now())
+	loc, locErr := time.LoadLocation("Europe/Moscow")
+	if locErr != nil {
+		loc = time.UTC
+	}
+	next := schedule.Next(time.Now().In(loc))
 	return &next
 }
 

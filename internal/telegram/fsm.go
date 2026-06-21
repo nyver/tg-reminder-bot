@@ -17,10 +17,13 @@ type DialogStore interface {
 // DialogContext carries the pending NLU parse result while awaiting confirmation.
 type DialogContext struct {
 	RawText    string          `json:"raw_text"`
+	Kind       domain.Kind     `json:"kind,omitempty"`
 	ParsedSpec json.RawMessage `json:"parsed_spec,omitempty"`
 	Confidence float64         `json:"confidence,omitempty"`
 	Missing    []string        `json:"missing,omitempty"`
 	FieldName  string          `json:"field_name,omitempty"` // for await_field state
+	EvalCron   string          `json:"eval_cron,omitempty"`
+	FireAt     *string         `json:"fire_at,omitempty"`
 }
 
 func encodeContext(dc *DialogContext) (json.RawMessage, error) {

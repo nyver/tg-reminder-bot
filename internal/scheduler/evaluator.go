@@ -30,10 +30,10 @@ type HistoryRepo interface {
 
 // Evaluator converts a Reminder into zero or more PlannedNotifications.
 type Evaluator struct {
-	registry        providerRegistry
-	history         HistoryRepo
-	clock           clock.Clock
-	maxHorizonDays  int
+	registry       providerRegistry
+	history        HistoryRepo
+	clock          clock.Clock
+	maxHorizonDays int
 }
 
 type providerRegistry interface {
@@ -60,8 +60,27 @@ func (e *Evaluator) Evaluate(ctx context.Context, r domain.Reminder) ([]PlannedN
 	case domain.TriggerDigest:
 		return e.evaluateDigest(ctx, r)
 	default:
+		if r.Kind == domain.KindAbsolute || r.Kind == domain.KindRecurring {
+			return e.evaluateScheduled(r), nil
+		}
 		return nil, fmt.Errorf("unknown trigger %q", r.Spec.Trigger)
 	}
+}
+
+func (e *Evaluator) evaluateScheduled(r domain.Reminder) []PlannedNotification {
+	due := e.clock.Now()
+	if r.NextEvalAt != nil {
+		due = *r.NextEvalAt
+	}
+	text := r.Spec.Message
+	if text == "" {
+		text = r.RawText
+	}
+	return []PlannedNotification{{
+		FireAt:         due,
+		Text:           text,
+		IdempotencyKey: idemKey(r.ID, "scheduled:"+due.UTC().Format(time.RFC3339Nano)),
+	}}
 }
 
 // Window computes the sliding date window [startOfDay(now), +horizon].
@@ -107,7 +126,10 @@ func (e *Evaluator) evaluateAnchor(ctx context.Context, r domain.Reminder) ([]Pl
 	for _, ev := range events {
 		fireAt := ev.AnchorAt.Add(-r.Spec.LeadTime.Duration)
 		if fireAt.Before(now) {
-			continue // too late
+			if !ev.AnchorAt.After(now) {
+				continue // The event itself has already started.
+			}
+			fireAt = now // Lead time was missed, but the event is still upcoming.
 		}
 		key := idemKey(r.ID, "anchor:"+ev.Identity)
 		result = append(result, PlannedNotification{

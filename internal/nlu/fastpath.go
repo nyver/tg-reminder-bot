@@ -25,6 +25,11 @@ func NewFastPath(loc *time.Location) *FastPath {
 }
 
 var (
+	reTVAnchor = regexp.MustCompile(
+		`(?i)(?:уведоми|напомни)(?:\s+мне)?\s+за\s+(\d+)\s*` +
+			`(час(?:а|ов)?|минут(?:у|ы)?|день|дня|дней)\s+до\s+` +
+			`(?:программы\s+|передачи\s+)?["«]?(.+?)["»]?\s+на\s+(.+?)\s*$`)
+
 	reAbsolute = regexp.MustCompile(
 		`(?i)напомни?\s+(?:мне\s+)?` +
 			`(?:(\d{1,2})[./](\d{1,2})(?:[./](\d{2,4}))?\s+)?` +
@@ -42,6 +47,9 @@ var (
 func (p *FastPath) Parse(ctx context.Context, text string) (*ParseResult, error) {
 	text = strings.TrimSpace(text)
 
+	if m := reTVAnchor.FindStringSubmatch(text); m != nil {
+		return p.parseTVAnchor(m), nil
+	}
 	if m := reRecurring.FindStringSubmatch(text); m != nil {
 		return p.parseRecurring(m), nil
 	}
@@ -49,6 +57,47 @@ func (p *FastPath) Parse(ctx context.Context, text string) (*ParseResult, error)
 		return p.parseAbsolute(m), nil
 	}
 	return &ParseResult{Spec: &domain.Spec{}, Confidence: 0}, nil
+}
+
+func (p *FastPath) parseTVAnchor(m []string) *ParseResult {
+	amount, _ := strconv.Atoi(m[1])
+	unit := time.Hour
+	switch strings.ToLower(m[2]) {
+	case "минута", "минуту", "минуты", "минут":
+		unit = time.Minute
+	case "день", "дня", "дней":
+		unit = 24 * time.Hour
+	}
+	title := strings.Trim(strings.TrimSpace(m[3]), `"«»`)
+	channel := normalizeTVChannel(m[4])
+	return &ParseResult{
+		Kind: domain.KindConditional,
+		Spec: &domain.Spec{
+			Trigger:  domain.TriggerAnchor,
+			LeadTime: domain.Duration{Duration: time.Duration(amount) * unit},
+			Event: domain.EventSpec{
+				Type:   "tv_program",
+				Title:  title,
+				Params: map[string]string{"channel": channel},
+			},
+			Message: title,
+		},
+		Confidence: 0.98,
+	}
+}
+
+func normalizeTVChannel(value string) string {
+	value = strings.Trim(strings.TrimSpace(value), `"«»`)
+	lower := strings.ToLower(value)
+	for _, suffix := range []string{" канале", " каналу", " канал"} {
+		lower = strings.TrimSpace(strings.TrimSuffix(lower, suffix))
+	}
+	switch lower {
+	case "первом", "первый", "первом канале":
+		return "Первый канал"
+	default:
+		return strings.TrimSpace(value)
+	}
 }
 
 func (p *FastPath) parseAbsolute(m []string) *ParseResult {
@@ -82,6 +131,7 @@ func (p *FastPath) parseAbsolute(m []string) *ParseResult {
 
 	fireAt := target.Format(time.RFC3339)
 	return &ParseResult{
+		Kind: domain.KindAbsolute,
 		Spec: &domain.Spec{
 			Message: strings.TrimSpace(m[8]),
 			Event:   domain.EventSpec{Type: "absolute"},
@@ -98,6 +148,7 @@ func (p *FastPath) parseRecurring(m []string) *ParseResult {
 
 	cron := buildCron(strings.ToLower(strings.TrimSpace(m[1])), h, min)
 	return &ParseResult{
+		Kind: domain.KindRecurring,
 		Spec: &domain.Spec{
 			Message: strings.TrimSpace(m[5]),
 			Event:   domain.EventSpec{Type: "recurring"},

@@ -5,14 +5,21 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 )
 
 func TestOpenRouterParser(t *testing.T) {
 	t.Parallel()
+	var requests atomic.Int32
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if requests.Add(1) == 1 {
+			w.Header().Set("Retry-After", "0")
+			http.Error(w, `{"error":"rate limited"}`, http.StatusTooManyRequests)
+			return
+		}
 		if r.URL.Path != "/chat/completions" {
 			t.Errorf("path = %q", r.URL.Path)
 		}
@@ -44,6 +51,9 @@ func TestOpenRouterParser(t *testing.T) {
 	}
 	if result.Confidence != 0.95 || result.Spec.Message != "test" {
 		t.Fatalf("unexpected result: %+v", result)
+	}
+	if requests.Load() != 2 {
+		t.Fatalf("requests = %d", requests.Load())
 	}
 }
 

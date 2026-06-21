@@ -76,6 +76,7 @@ func NewConfiguredLLMParser(provider, apiKey, model, baseURL string, loc *time.L
 }
 
 func openRouterCompleter(apiKey, model, baseURL string) func(context.Context, string) (string, error) {
+	const maxAttempts = 3
 	client := &http.Client{Timeout: 30 * time.Second}
 	endpoint := strings.TrimRight(baseURL, "/") + "/chat/completions"
 	return func(ctx context.Context, prompt string) (string, error) {
@@ -88,38 +89,81 @@ func openRouterCompleter(apiKey, model, baseURL string) func(context.Context, st
 		if err != nil {
 			return "", err
 		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
-		if err != nil {
-			return "", err
+		var lastErr error
+		for attempt := 0; attempt < maxAttempts; attempt++ {
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+			if err != nil {
+				return "", err
+			}
+			req.Header.Set("Authorization", "Bearer "+apiKey)
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := client.Do(req)
+			if err != nil {
+				lastErr = err
+			} else {
+				data, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+				_ = resp.Body.Close()
+				if readErr != nil {
+					return "", readErr
+				}
+				if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+					var result struct {
+						Choices []struct {
+							Message struct {
+								Content string `json:"content"`
+							} `json:"message"`
+						} `json:"choices"`
+					}
+					if err := json.Unmarshal(data, &result); err != nil {
+						return "", err
+					}
+					if len(result.Choices) == 0 {
+						return "", fmt.Errorf("OpenRouter returned no choices")
+					}
+					return result.Choices[0].Message.Content, nil
+				}
+				lastErr = fmt.Errorf("OpenRouter HTTP %d: %.300s", resp.StatusCode, data)
+				if resp.StatusCode != http.StatusTooManyRequests && resp.StatusCode < 500 {
+					return "", lastErr
+				}
+				if delay, ok := retryAfter(resp.Header.Get("Retry-After")); ok && attempt+1 < maxAttempts {
+					if err := waitForRetry(ctx, delay); err != nil {
+						return "", err
+					}
+					continue
+				}
+			}
+			if attempt+1 < maxAttempts {
+				if err := waitForRetry(ctx, time.Duration(1<<attempt)*time.Second); err != nil {
+					return "", err
+				}
+			}
 		}
-		req.Header.Set("Authorization", "Bearer "+apiKey)
-		req.Header.Set("Content-Type", "application/json")
-		resp, err := client.Do(req)
-		if err != nil {
-			return "", err
-		}
-		defer resp.Body.Close()
-		data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		if err != nil {
-			return "", err
-		}
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return "", fmt.Errorf("OpenRouter HTTP %d: %.300s", resp.StatusCode, data)
-		}
-		var result struct {
-			Choices []struct {
-				Message struct {
-					Content string `json:"content"`
-				} `json:"message"`
-			} `json:"choices"`
-		}
-		if err := json.Unmarshal(data, &result); err != nil {
-			return "", err
-		}
-		if len(result.Choices) == 0 {
-			return "", fmt.Errorf("OpenRouter returned no choices")
-		}
-		return result.Choices[0].Message.Content, nil
+		return "", lastErr
+	}
+}
+
+func retryAfter(value string) (time.Duration, bool) {
+	if value == "" {
+		return 0, false
+	}
+	if seconds, err := time.ParseDuration(value + "s"); err == nil {
+		return max(seconds, 0), true
+	}
+	if at, err := http.ParseTime(value); err == nil {
+		return max(time.Until(at), 0), true
+	}
+	return 0, false
+}
+
+func waitForRetry(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
 	}
 }
 
@@ -245,6 +289,7 @@ func mapToResult(resp *llmResponse) (*ParseResult, error) {
 	}
 
 	result := &ParseResult{
+		Kind:       domain.Kind(resp.Kind),
 		Spec:       spec,
 		Confidence: resp.Confidence,
 		Missing:    resp.Missing,

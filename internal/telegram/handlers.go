@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/nyver2k/remindertgbot/internal/domain"
 	"github.com/nyver2k/remindertgbot/internal/nlu"
+	"github.com/robfig/cron/v3"
 	tele "gopkg.in/telebot.v3"
 )
 
@@ -211,15 +212,21 @@ func (h *Handler) startParsing(ctx context.Context, c tele.Context, userID int64
 		h.log.Error("parse failed", "err", err)
 		return c.Send("Не удалось распознать напоминание. Попробуйте переформулировать.")
 	}
+	if result == nil || result.Spec == nil || result.Confidence <= 0 {
+		return c.Send("Не удалось распознать напоминание. Попробуйте переформулировать.")
+	}
 
 	// Ask clarification if fields are missing.
-	if len(result.Missing) > 0 && result.Confidence < 0.7 {
+	if len(result.Missing) > 0 {
 		ctxData := &DialogContext{
 			RawText:    text,
+			Kind:       result.Kind,
 			ParsedSpec: mustMarshal(result.Spec),
 			Confidence: result.Confidence,
 			Missing:    result.Missing,
 			FieldName:  result.Missing[0],
+			EvalCron:   result.EvalCron,
+			FireAt:     result.FireAt,
 		}
 		ctxJSON, _ := encodeContext(ctxData)
 		_ = h.dialogs.Set(ctx, &domain.Dialog{
@@ -229,6 +236,10 @@ func (h *Handler) startParsing(ctx context.Context, c tele.Context, userID int64
 		})
 		return c.Send(fmt.Sprintf("Уточните: %s", fieldPrompt(result.Missing[0])))
 	}
+	if err := validateParseResult(result); err != nil {
+		h.log.Warn("invalid parse result", "err", err, "confidence", result.Confidence)
+		return c.Send("Не удалось определить все параметры напоминания. Попробуйте указать передачу, канал и время уведомления точнее.")
+	}
 
 	// Show confirmation.
 	return h.askConfirmation(ctx, c, userID, text, result)
@@ -237,8 +248,11 @@ func (h *Handler) startParsing(ctx context.Context, c tele.Context, userID int64
 func (h *Handler) askConfirmation(ctx context.Context, c tele.Context, userID int64, rawText string, result *nlu.ParseResult) error {
 	ctxData := &DialogContext{
 		RawText:    rawText,
+		Kind:       result.Kind,
 		ParsedSpec: mustMarshal(result.Spec),
 		Confidence: result.Confidence,
+		EvalCron:   result.EvalCron,
+		FireAt:     result.FireAt,
 	}
 	ctxJSON, _ := encodeContext(ctxData)
 	_ = h.dialogs.Set(ctx, &domain.Dialog{
@@ -276,7 +290,16 @@ func (h *Handler) handleConfirmYes(c tele.Context) error {
 		return c.Respond(&tele.CallbackResponse{Text: "Ошибка данных."})
 	}
 
-	rem := buildReminder(userID, dc.RawText, spec)
+	result := &nlu.ParseResult{
+		Kind: dc.Kind, Spec: &spec, Confidence: dc.Confidence,
+		EvalCron: dc.EvalCron, FireAt: dc.FireAt,
+	}
+	rem, err := buildReminder(userID, dc.RawText, result, time.Now())
+	if err != nil {
+		h.log.Error("build reminder", "err", err)
+		_ = h.dialogs.Reset(ctx, userID)
+		return c.Respond(&tele.CallbackResponse{Text: "Некорректные параметры напоминания."})
+	}
 	if err := h.reminders.Create(ctx, rem); err != nil {
 		h.log.Error("create reminder", "err", err)
 		return c.Respond(&tele.CallbackResponse{Text: "Ошибка сохранения."})
@@ -310,22 +333,120 @@ func (h *Handler) handleFieldInput(ctx context.Context, c tele.Context, dialog *
 	return h.askConfirmation(ctx, c, c.Sender().ID, combined, result)
 }
 
-func buildReminder(userID int64, rawText string, spec domain.Spec) *domain.Reminder {
+const defaultConditionalCron = "*/15 * * * *"
+
+func buildReminder(userID int64, rawText string, result *nlu.ParseResult, now time.Time) (*domain.Reminder, error) {
+	if err := validateParseResult(result); err != nil {
+		return nil, err
+	}
+	spec := *result.Spec
+	kind := parseResultKind(result)
 	rem := &domain.Reminder{
 		UserID:  userID,
 		RawText: rawText,
 		Spec:    spec,
 		Status:  domain.StatusActive,
+		Kind:    kind,
 	}
-	switch spec.Trigger {
-	case domain.TriggerAnchor, domain.TriggerThreshold, domain.TriggerDigest:
-		rem.Kind = domain.KindConditional
-	default:
-		if spec.Trigger == "" {
-			rem.Kind = domain.KindAbsolute
+	switch kind {
+	case domain.KindAbsolute:
+		fireAt, err := time.Parse(time.RFC3339, *result.FireAt)
+		if err != nil {
+			return nil, fmt.Errorf("parse fire_at: %w", err)
 		}
+		rem.NextEvalAt = &fireAt
+	case domain.KindRecurring:
+		rem.EvalCron = result.EvalCron
+		next, err := nextCronAt(result.EvalCron, now)
+		if err != nil {
+			return nil, err
+		}
+		rem.NextEvalAt = &next
+	case domain.KindConditional:
+		rem.EvalCron = result.EvalCron
+		if rem.EvalCron == "" {
+			rem.EvalCron = defaultConditionalCron
+		}
+		next := now.UTC()
+		rem.NextEvalAt = &next
+	default:
+		return nil, fmt.Errorf("unsupported reminder kind %q", kind)
 	}
-	return rem
+	return rem, nil
+}
+
+func validateParseResult(result *nlu.ParseResult) error {
+	if result == nil || result.Spec == nil || result.Confidence <= 0 {
+		return fmt.Errorf("empty parse result")
+	}
+	kind := parseResultKind(result)
+	switch kind {
+	case domain.KindAbsolute:
+		if result.FireAt == nil {
+			return fmt.Errorf("absolute reminder has no fire_at")
+		}
+		if _, err := time.Parse(time.RFC3339, *result.FireAt); err != nil {
+			return fmt.Errorf("invalid fire_at: %w", err)
+		}
+	case domain.KindRecurring:
+		if _, err := parseCron(result.EvalCron); err != nil {
+			return err
+		}
+	case domain.KindConditional:
+		if result.Spec.Trigger == "" || result.Spec.Event.Type == "" || result.Spec.Event.Title == "" {
+			return fmt.Errorf("conditional reminder is incomplete")
+		}
+		if result.Spec.Event.Type == "tv_program" &&
+			result.Spec.Event.Params["channel"] == "" && result.Spec.Event.Params["channel_id"] == "" {
+			return fmt.Errorf("TV reminder has no channel")
+		}
+	default:
+		return fmt.Errorf("unknown reminder kind %q", kind)
+	}
+	return nil
+}
+
+func parseResultKind(result *nlu.ParseResult) domain.Kind {
+	if result == nil || result.Spec == nil {
+		return ""
+	}
+	if result.Spec.Trigger == domain.TriggerAnchor || result.Spec.Trigger == domain.TriggerThreshold || result.Spec.Trigger == domain.TriggerDigest {
+		return domain.KindConditional
+	}
+	if result.Kind != "" {
+		return result.Kind
+	}
+	if result.FireAt != nil {
+		return domain.KindAbsolute
+	}
+	if result.EvalCron != "" {
+		return domain.KindRecurring
+	}
+	return ""
+}
+
+func parseCron(expr string) (cron.Schedule, error) {
+	if strings.TrimSpace(expr) == "" {
+		return nil, fmt.Errorf("cron expression is empty")
+	}
+	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
+	schedule, err := parser.Parse(expr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid cron expression: %w", err)
+	}
+	return schedule, nil
+}
+
+func nextCronAt(expr string, now time.Time) (time.Time, error) {
+	schedule, err := parseCron(expr)
+	if err != nil {
+		return time.Time{}, err
+	}
+	loc, err := time.LoadLocation("Europe/Moscow")
+	if err != nil {
+		loc = time.UTC
+	}
+	return schedule.Next(now.In(loc)), nil
 }
 
 func formatSpec(spec *domain.Spec) string {

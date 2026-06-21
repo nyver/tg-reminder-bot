@@ -2,12 +2,14 @@ package nlu
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/nyver2k/remindertgbot/internal/domain"
 )
 
 // ParseResult is the output of the NLU pipeline.
 type ParseResult struct {
+	Kind       domain.Kind
 	Spec       *domain.Spec
 	Confidence float64
 	Missing    []string // field names that need clarification
@@ -32,9 +34,14 @@ func NewChain(threshold float64, parsers ...Parser) *Chain {
 
 func (c *Chain) Parse(ctx context.Context, text string) (*ParseResult, error) {
 	var best *ParseResult
+	var lastErr error
 	for _, p := range c.parsers {
 		result, err := p.Parse(ctx, text)
 		if err != nil {
+			lastErr = err
+			continue
+		}
+		if emptyResult(result) {
 			continue
 		}
 		if result.Confidence >= c.threshold {
@@ -47,5 +54,17 @@ func (c *Chain) Parse(ctx context.Context, text string) (*ParseResult, error) {
 	if best != nil {
 		return best, nil
 	}
-	return &ParseResult{Spec: &domain.Spec{}, Confidence: 0}, nil
+	if lastErr != nil {
+		return nil, fmt.Errorf("all NLU parsers failed: %w", lastErr)
+	}
+	return nil, fmt.Errorf("could not recognize reminder")
+}
+
+func emptyResult(result *ParseResult) bool {
+	if result == nil || result.Spec == nil {
+		return true
+	}
+	return result.Confidence == 0 && result.Kind == "" && result.FireAt == nil &&
+		result.EvalCron == "" && result.Spec.Trigger == "" &&
+		result.Spec.Event.Type == "" && result.Spec.Message == ""
 }

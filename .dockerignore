@@ -1,0 +1,30 @@
+.git
+.gitignore
+.agents
+.codex
+.gocache
+.cache
+.idea
+.vscode
+
+# Local secrets and runtime data
+.env
+.env.*
+config.yaml
+data
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Local build artifacts
+bin
+dist
+tmp
+temp
+*.exe
+*.test
+*.out
+coverage.out
+coverage.html
