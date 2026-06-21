@@ -1,0 +1,43 @@
+database:
+  # Драйвер БД: "sqlite" (по умолчанию) или "postgres"
+  driver: sqlite
+  # SQLite: путь к файлу. Postgres: connection string.
+  dsn: ./data/remind.db
+  # dsn: postgres://remind:remind@localhost:5432/remind?sslmode=disable
+
+telegram:
+  token: ""  # TELEGRAM_TOKEN (или задать здесь)
+
+nlu:
+  # Провайдер LLM: "claude" или "openrouter"
+  provider: openrouter
+  api_key: ""  # LLM_API_KEY (или задать здесь)
+  claude:
+    model: claude-haiku-4-5-20251001
+  openrouter:
+    base_url: https://openrouter.ai/api/v1
+    model: anthropic/claude-haiku-4.5
+    # Другие доступные модели:
+    # model: google/gemini-flash-1.5
+    # model: openai/gpt-4o-mini
+    # model: mistralai/mistral-small
+
+providers:
+  tv_api_base_url: ""
+  price:
+    user_agent: remind-bot/1.0
+    headless: false
+  travel:
+    air_api_key: ""
+    rail_api_key: ""
+    timeout: 10s
+    max_horizon_days: 180
+
+scheduler:
+  watcher_tick: 1m
+  delivery_tick: 15s
+
+server:
+  api_port: 8080
+  worker_id: ""
+  log_level: info

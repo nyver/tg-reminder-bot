@@ -1,0 +1,196 @@
+package config
+
+import (
+	"bytes"
+	"fmt"
+	"os"
+	"strings"
+	"time"
+
+	"gopkg.in/yaml.v3"
+)
+
+type Config struct {
+	Database  DatabaseConfig  `yaml:"database"`
+	Telegram  TelegramConfig  `yaml:"telegram"`
+	NLU       NLUConfig       `yaml:"nlu"`
+	Providers ProvidersConfig `yaml:"providers"`
+	Scheduler SchedulerConfig `yaml:"scheduler"`
+	Server    ServerConfig    `yaml:"server"`
+}
+
+type DatabaseConfig struct {
+	Driver string `yaml:"driver"` // "sqlite" | "postgres"
+	DSN    string `yaml:"dsn"`
+}
+
+type TelegramConfig struct {
+	Token string `yaml:"token"`
+}
+
+type NLUConfig struct {
+	Provider   string           `yaml:"provider"` // "claude" | "openrouter"
+	APIKey     string           `yaml:"api_key"`
+	Claude     ClaudeConfig     `yaml:"claude"`
+	OpenRouter OpenRouterConfig `yaml:"openrouter"`
+}
+
+type ClaudeConfig struct {
+	Model string `yaml:"model"`
+}
+
+type OpenRouterConfig struct {
+	BaseURL string `yaml:"base_url"`
+	Model   string `yaml:"model"`
+}
+
+type ProvidersConfig struct {
+	TVAPIBaseURL string       `yaml:"tv_api_base_url"`
+	Price        PriceConfig  `yaml:"price"`
+	Travel       TravelConfig `yaml:"travel"`
+}
+
+type PriceConfig struct {
+	UserAgent string `yaml:"user_agent"`
+	Headless  bool   `yaml:"headless"`
+}
+
+type TravelConfig struct {
+	AirAPIKey      string        `yaml:"air_api_key"`
+	RailAPIKey     string        `yaml:"rail_api_key"`
+	Timeout        time.Duration `yaml:"timeout"`
+	MaxHorizonDays int           `yaml:"max_horizon_days"`
+}
+
+type SchedulerConfig struct {
+	WatcherTick  time.Duration `yaml:"watcher_tick"`
+	DeliveryTick time.Duration `yaml:"delivery_tick"`
+}
+
+type ServerConfig struct {
+	APIPort  int    `yaml:"api_port"`
+	WorkerID string `yaml:"worker_id"`
+	LogLevel string `yaml:"log_level"`
+}
+
+// Load reads config.yaml (or the file at CONFIG_FILE env var) and applies
+// environment variable overrides for secrets.
+func Load() (*Config, error) {
+	path := configPath()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read config %s: %w", path, err)
+	}
+
+	// Expand ${VAR} and $VAR in the raw YAML before parsing.
+	data = []byte(os.ExpandEnv(string(data)))
+
+	cfg := defaults()
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(cfg); err != nil {
+		return nil, fmt.Errorf("parse config: %w", err)
+	}
+
+	applyEnvOverrides(cfg)
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+// LoadOrDefaults returns defaults if config file is absent (useful for remindctl).
+func LoadOrDefaults() (*Config, error) {
+	cfg, err := Load()
+	if os.IsNotExist(err) {
+		cfg = defaults()
+		applyEnvOverrides(cfg)
+		return cfg, nil
+	}
+	return cfg, err
+}
+
+func configPath() string {
+	if p := os.Getenv("CONFIG_FILE"); p != "" {
+		return p
+	}
+	return "config.yaml"
+}
+
+func defaults() *Config {
+	return &Config{
+		Database: DatabaseConfig{
+			Driver: "sqlite",
+			DSN:    "./data/remind.db",
+		},
+		NLU: NLUConfig{
+			Provider: "openrouter",
+			Claude: ClaudeConfig{
+				Model: "claude-haiku-4-5-20251001",
+			},
+			OpenRouter: OpenRouterConfig{
+				BaseURL: "https://openrouter.ai/api/v1",
+				Model:   "anthropic/claude-haiku-4.5",
+			},
+		},
+		Providers: ProvidersConfig{
+			Price: PriceConfig{
+				UserAgent: "remind-bot/1.0",
+			},
+			Travel: TravelConfig{
+				Timeout:        10 * time.Second,
+				MaxHorizonDays: 180,
+			},
+		},
+		Scheduler: SchedulerConfig{
+			WatcherTick:  time.Minute,
+			DeliveryTick: 15 * time.Second,
+		},
+		Server: ServerConfig{
+			APIPort:  8080,
+			LogLevel: "info",
+		},
+	}
+}
+
+// applyEnvOverrides lets operators override sensitive values via environment
+// variables without touching the config file.
+func applyEnvOverrides(cfg *Config) {
+	if v := os.Getenv("TELEGRAM_TOKEN"); v != "" {
+		cfg.Telegram.Token = v
+	}
+	if v := os.Getenv("LLM_API_KEY"); v != "" {
+		cfg.NLU.APIKey = v
+	}
+	if v := os.Getenv("DATABASE_DSN"); v != "" {
+		cfg.Database.DSN = v
+	}
+	if v := os.Getenv("DATABASE_DRIVER"); v != "" {
+		cfg.Database.Driver = v
+	}
+	// DATABASE_URL is the conventional PostgreSQL override and has the
+	// highest precedence over the generic database variables.
+	if v := os.Getenv("DATABASE_URL"); v != "" {
+		cfg.Database.DSN = v
+		cfg.Database.Driver = "postgres"
+	}
+	if v := os.Getenv("LOG_LEVEL"); v != "" {
+		cfg.Server.LogLevel = v
+	}
+}
+
+// Validate rejects configuration errors early, before a service starts.
+func (cfg *Config) Validate() error {
+	cfg.Database.Driver = strings.ToLower(strings.TrimSpace(cfg.Database.Driver))
+	if cfg.Database.Driver != "sqlite" && cfg.Database.Driver != "postgres" {
+		return fmt.Errorf("config: database.driver must be sqlite or postgres")
+	}
+	if strings.TrimSpace(cfg.Database.DSN) == "" {
+		return fmt.Errorf("config: database.dsn is required")
+	}
+	cfg.NLU.Provider = strings.ToLower(strings.TrimSpace(cfg.NLU.Provider))
+	if cfg.NLU.Provider != "claude" && cfg.NLU.Provider != "openrouter" {
+		return fmt.Errorf("config: nlu.provider must be claude or openrouter")
+	}
+	return nil
+}

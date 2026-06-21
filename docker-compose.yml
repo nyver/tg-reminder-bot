@@ -1,0 +1,51 @@
+name: remind
+
+x-app: &app
+  build:
+    context: .
+    dockerfile: Dockerfile
+    args:
+      VERSION: ${VERSION:-dev}
+  image: remind:local
+  environment:
+    TELEGRAM_TOKEN: ${TELEGRAM_TOKEN:-}
+    LLM_API_KEY: ${LLM_API_KEY:-}
+    LOG_LEVEL: ${LOG_LEVEL:-info}
+    DATABASE_DRIVER: ${DATABASE_DRIVER:-sqlite}
+    DATABASE_DSN: ${DATABASE_DSN:-/data/remind.db}
+    DATABASE_URL: ${DATABASE_URL:-}
+  volumes:
+    - reminddata:/data
+  restart: unless-stopped
+
+services:
+  migrate:
+    <<: *app
+    command: ["/usr/local/bin/remindctl", "migrate", "up"]
+    restart: on-failure
+
+  bot:
+    <<: *app
+    command: ["/usr/local/bin/bot"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  worker:
+    <<: *app
+    command: ["/usr/local/bin/worker"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  api:
+    <<: *app
+    command: ["/usr/local/bin/api"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - "${API_PORT:-8080}:8080"
+
+volumes:
+  reminddata:

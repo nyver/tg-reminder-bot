@@ -1,0 +1,66 @@
+package provider
+
+import (
+	"context"
+	"time"
+)
+
+// EventProvider looks up time-anchored events (e.g. TV schedule).
+type EventProvider interface {
+	Type() string
+	Lookup(ctx context.Context, q Query, from, to time.Time) ([]Event, error)
+}
+
+// MetricProvider samples a scalar metric (e.g. product price).
+type MetricProvider interface {
+	Type() string
+	Sample(ctx context.Context, q Query) (Measurement, error)
+}
+
+// SearchProvider searches for offers within a date range (e.g. travel tickets).
+type SearchProvider interface {
+	Type() string
+	Search(ctx context.Context, q SearchQuery) ([]Offer, error)
+}
+
+type Query struct {
+	Title  string
+	Params map[string]string
+}
+
+// SearchQuery carries the sliding-window date range computed from HorizonDays.
+type SearchQuery struct {
+	Origin, Destination string
+	DateFrom, DateTo    time.Time
+	Modes               []string
+	Limit               int
+}
+
+type Event struct {
+	Identity string
+	Title    string
+	AnchorAt time.Time
+	Meta     map[string]string
+}
+
+type Measurement struct {
+	Value     int64
+	Currency  string
+	Available bool
+	Title     string
+	Meta      map[string]string
+}
+
+type Offer struct {
+	Signature string // dedup key: mode|carrier|number|depart_date
+	Mode      string // air | rail
+	Title     string
+	Carrier   string
+	Price     int64 // kopecks
+	Currency  string
+	DepartAt  time.Time
+	Duration  time.Duration
+	Transfers int
+	BookURL   string
+	Meta      map[string]string
+}

@@ -1,0 +1,49 @@
+# Go build and test artifacts
+/bin/
+/dist/
+/api
+/bot
+/worker
+/remindctl
+*.exe
+*.test
+*.out
+coverage.out
+coverage.html
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+config.yaml
+
+# SQLite databases and sidecar files
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Logs, caches, and temporary files
+*.log
+.gocache/
+.cache/
+/tmp/
+/temp/
+
+# IDE and OS metadata
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Local agent metadata
+.agents/
+.codex/
+
+reminder-bot-spec.md
+reminder-bot-roadmap.md
+promt.txt
+.history
