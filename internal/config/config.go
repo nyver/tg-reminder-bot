@@ -46,6 +46,7 @@ type OpenRouterConfig struct {
 
 type ProvidersConfig struct {
 	TV     TVConfig     `yaml:"tv"`
+	IPTVX  IPTVXConfig  `yaml:"iptvx"`
 	Price  PriceConfig  `yaml:"price"`
 	Travel TravelConfig `yaml:"travel"`
 }
@@ -54,6 +55,13 @@ type TVConfig struct {
 	BaseURL string        `yaml:"base_url"`
 	APIKey  string        `yaml:"api_key"`
 	Timeout time.Duration `yaml:"timeout"`
+}
+
+type IPTVXConfig struct {
+	URL            string        `yaml:"url"`
+	FilePath       string        `yaml:"file_path"`
+	UpdateInterval time.Duration `yaml:"update_interval"`
+	Timeout        time.Duration `yaml:"timeout"`
 }
 
 type PriceConfig struct {
@@ -69,8 +77,9 @@ type TravelConfig struct {
 }
 
 type SchedulerConfig struct {
-	WatcherTick  time.Duration `yaml:"watcher_tick"`
-	DeliveryTick time.Duration `yaml:"delivery_tick"`
+	WatcherTick      time.Duration `yaml:"watcher_tick"`
+	DeliveryTick     time.Duration `yaml:"delivery_tick"`
+	HousekeepingTick time.Duration `yaml:"housekeeping_tick"`
 }
 
 type ServerConfig struct {
@@ -144,6 +153,12 @@ func defaults() *Config {
 				BaseURL: "https://api.epgservice.ru",
 				Timeout: 15 * time.Second,
 			},
+			IPTVX: IPTVXConfig{
+				URL:            "https://iptvx.one/epg/epg.xml.gz",
+				FilePath:       "./data/iptvx_epg.xml.gz",
+				UpdateInterval: 7 * 24 * time.Hour,
+				Timeout:        120 * time.Second,
+			},
 			Price: PriceConfig{
 				UserAgent: "remind-bot/1.0",
 			},
@@ -153,8 +168,9 @@ func defaults() *Config {
 			},
 		},
 		Scheduler: SchedulerConfig{
-			WatcherTick:  time.Minute,
-			DeliveryTick: 15 * time.Second,
+			WatcherTick:      time.Minute,
+			DeliveryTick:     15 * time.Second,
+			HousekeepingTick: time.Hour,
 		},
 		Server: ServerConfig{
 			APIPort:  8080,
@@ -177,6 +193,12 @@ func applyEnvOverrides(cfg *Config) {
 	}
 	if v := os.Getenv("EPG_SERVICE_BASE_URL"); v != "" {
 		cfg.Providers.TV.BaseURL = v
+	}
+	if v := os.Getenv("IPTVX_EPG_URL"); v != "" {
+		cfg.Providers.IPTVX.URL = v
+	}
+	if v := os.Getenv("IPTVX_EPG_FILE"); v != "" {
+		cfg.Providers.IPTVX.FilePath = v
 	}
 	if v := os.Getenv("DATABASE_DSN"); v != "" {
 		cfg.Database.DSN = v
@@ -207,6 +229,12 @@ func (cfg *Config) Validate() error {
 	cfg.NLU.Provider = strings.ToLower(strings.TrimSpace(cfg.NLU.Provider))
 	if cfg.NLU.Provider != "claude" && cfg.NLU.Provider != "openrouter" {
 		return fmt.Errorf("config: nlu.provider must be claude or openrouter")
+	}
+	cfg.Server.LogLevel = strings.ToLower(strings.TrimSpace(cfg.Server.LogLevel))
+	switch cfg.Server.LogLevel {
+	case "debug", "info", "warn", "error":
+	default:
+		return fmt.Errorf("config: server.log_level must be one of: debug, info, warn, error")
 	}
 	return nil
 }

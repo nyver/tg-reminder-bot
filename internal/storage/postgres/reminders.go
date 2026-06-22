@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -29,20 +30,33 @@ func (r *ReminderRepo) Create(ctx context.Context, rem *domain.Reminder) error {
 
 	const q = `
 		INSERT INTO reminders
-			(id, user_id, kind, raw_text, spec, status, eval_cron, next_eval_at, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`
+			(id, user_id, kind, raw_text, spec, status, eval_cron, next_eval_at, idempotency_key, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+		ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING`
 
 	var evalCron *string
 	if rem.EvalCron != "" {
 		evalCron = &rem.EvalCron
 	}
-	_, err = r.db.ExecContext(ctx, r.db.Rebind(q),
+	var idemKey *string
+	if rem.IdempotencyKey != "" {
+		idemKey = &rem.IdempotencyKey
+	}
+	result, err := r.db.ExecContext(ctx, r.db.Rebind(q),
 		rem.ID.String(), rem.UserID, string(rem.Kind), rem.RawText,
 		string(specJSON), string(rem.Status),
 		NullString(evalCron), NullTime(rem.NextEvalAt),
+		NullString(idemKey),
 		now, now,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	n, _ := result.RowsAffected()
+	if n == 0 {
+		return domain.ErrAlreadyExists
+	}
+	return nil
 }
 
 func (r *ReminderRepo) Get(ctx context.Context, id uuid.UUID) (*domain.Reminder, error) {
@@ -118,7 +132,7 @@ func (r *ReminderRepo) UpdateStatus(ctx context.Context, id uuid.UUID, status do
 
 func (r *ReminderRepo) Cancel(ctx context.Context, userID int64, id uuid.UUID) error {
 	res, err := r.db.ExecContext(ctx,
-		r.db.Rebind(`UPDATE reminders SET status='done', updated_at=$1 WHERE id=$2 AND user_id=$3`),
+		r.db.Rebind(`UPDATE reminders SET status='done', idempotency_key=NULL, updated_at=$1 WHERE id=$2 AND user_id=$3`),
 		time.Now().UTC(), id.String(), userID)
 	if err != nil {
 		return err
@@ -143,6 +157,18 @@ func (r *ReminderRepo) Remove(ctx context.Context, userID int64, id uuid.UUID) e
 		return domain.ErrNotFound
 	}
 	return nil
+}
+
+// MarkConditionalDue resets next_eval_at to now for all active conditional
+// reminders so the watcher evaluates them immediately on startup.
+// Uses the dialect-native NOW() so the stored format matches LeaseDue's comparison.
+func (r *ReminderRepo) MarkConditionalDue(ctx context.Context) error {
+	now := r.db.Now()
+	_, err := r.db.ExecContext(ctx, fmt.Sprintf(
+		`UPDATE reminders
+		 SET next_eval_at=%s, locked_at=NULL, locked_by=NULL
+		 WHERE status='active' AND kind='conditional'`, now))
+	return err
 }
 
 func (r *ReminderRepo) Pause(ctx context.Context, userID int64, id uuid.UUID, pause bool) error {

@@ -18,6 +18,7 @@ type ReminderStore interface {
 	LeaseDue(ctx context.Context, workerID string, limit int) ([]domain.Reminder, error)
 	UpdateNextEval(ctx context.Context, id uuid.UUID, next *time.Time) error
 	UpdateStatus(ctx context.Context, id uuid.UUID, status domain.Status) error
+	MarkConditionalDue(ctx context.Context) error
 }
 
 // NotificationEnqueuer enqueues produced notifications.
@@ -54,6 +55,8 @@ func NewWatcher(
 }
 
 func (w *Watcher) Run(ctx context.Context) error {
+	w.startup(ctx)
+
 	ticker := time.NewTicker(w.tick)
 	defer ticker.Stop()
 	for {
@@ -68,11 +71,26 @@ func (w *Watcher) Run(ctx context.Context) error {
 	}
 }
 
+func (w *Watcher) startup(ctx context.Context) {
+	if err := w.reminders.MarkConditionalDue(ctx); err != nil {
+		w.log.Warn("startup sweep: mark due failed", "err", err)
+		return
+	}
+	w.log.Info("startup sweep: evaluating conditional reminders")
+	if err := w.tick_(ctx); err != nil {
+		w.log.Warn("startup sweep: initial tick failed", "err", err)
+	}
+}
+
 func (w *Watcher) tick_(ctx context.Context) error {
 	batch, err := w.reminders.LeaseDue(ctx, w.workerID, watcherBatchSize)
 	if err != nil {
 		return err
 	}
+	if len(batch) == 0 {
+		return nil
+	}
+	w.log.Info("watcher tick: processing", "count", len(batch))
 	for _, rem := range batch {
 		w.processReminder(ctx, rem)
 	}

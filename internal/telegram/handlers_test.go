@@ -58,3 +58,32 @@ func TestValidateParseResultRejectsEmptySpec(t *testing.T) {
 		t.Fatal("expected validation error")
 	}
 }
+
+// TestBuildAbsoluteNonAnchorReminderPreservesFireAt ensures that absolute
+// reminders WITHOUT an anchor trigger (e.g. "напомни завтра в 9:00 позвонить")
+// still use the user-specified fire time for NextEvalAt.
+func TestBuildAbsoluteNonAnchorReminderPreservesFireAt(t *testing.T) {
+	now := time.Date(2026, 6, 21, 17, 30, 0, 0, time.UTC)
+	fireAt := "2026-06-22T09:00:00+03:00"
+	result := &nlu.ParseResult{
+		Kind:       domain.KindAbsolute,
+		Spec:       &domain.Spec{Message: "Позвонить маме"}, // no trigger
+		Confidence: 0.95,
+		FireAt:     &fireAt,
+	}
+
+	rem, err := buildReminder(1, "raw", result, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, _ := time.Parse(time.RFC3339, fireAt)
+	if rem.Kind != domain.KindAbsolute {
+		t.Fatalf("kind = %q", rem.Kind)
+	}
+	if rem.NextEvalAt == nil {
+		t.Fatal("expected NextEvalAt to be set")
+	}
+	if !rem.NextEvalAt.Equal(want) {
+		t.Fatalf("NextEvalAt = %v, want %v", rem.NextEvalAt, want)
+	}
+}

@@ -13,7 +13,7 @@ x-app: &app
     LLM_API_KEY: ${LLM_API_KEY:-}
     EPG_SERVICE_API_KEY: ${EPG_SERVICE_API_KEY:-}
     EPG_SERVICE_BASE_URL: ${EPG_SERVICE_BASE_URL:-}
-    LOG_LEVEL: ${LOG_LEVEL:-info}
+    LOG_LEVEL: ${LOG_LEVEL:-}
     DATABASE_DRIVER: ${DATABASE_DRIVER:-sqlite}
     DATABASE_DSN: ${DATABASE_DSN:-/data/remind.db}
     DATABASE_URL: ${DATABASE_URL:-}
@@ -27,6 +27,9 @@ services:
     <<: *app
     command: ["/usr/local/bin/remindctl", "migrate", "up"]
     restart: on-failure
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
 
   bot:
     <<: *app
@@ -34,6 +37,9 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
 
   worker:
     <<: *app
@@ -41,6 +47,9 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
 
   api:
     <<: *app
@@ -50,6 +59,9 @@ services:
         condition: service_completed_successfully
     ports:
       - "${API_PORT:-8080}:8080"
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
 
 volumes:
   reminddata:

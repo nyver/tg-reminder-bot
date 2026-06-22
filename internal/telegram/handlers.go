@@ -2,9 +2,13 @@ package telegram
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -92,10 +96,10 @@ func (h *Handler) handleList(c tele.Context) error {
 	var sb strings.Builder
 	sb.WriteString("*Ваши напоминания:*\n\n")
 	for i, r := range rems {
-		sb.WriteString(fmt.Sprintf("%d. %s \\[%s\\]\n`/cancel %s`\n`/remove %s`\n\n",
+		sb.WriteString(fmt.Sprintf("%d\\. %s \\[%s\\]\n`/cancel %s`\n`/remove %s`\n\n",
 			i+1, escapeMarkdown(r.RawText), string(r.Status), r.ID.String(), r.ID.String()))
 	}
-	return c.Send(sb.String(), tele.ModeMarkdown)
+	return c.Send(sb.String(), tele.ModeMarkdownV2)
 }
 
 func (h *Handler) handleCancel(c tele.Context) error {
@@ -301,6 +305,11 @@ func (h *Handler) handleConfirmYes(c tele.Context) error {
 		return c.Respond(&tele.CallbackResponse{Text: "Некорректные параметры напоминания."})
 	}
 	if err := h.reminders.Create(ctx, rem); err != nil {
+		if errors.Is(err, domain.ErrAlreadyExists) {
+			_ = h.dialogs.Reset(ctx, userID)
+			_ = c.Respond(&tele.CallbackResponse{})
+			return c.Edit("ℹ️ У вас уже есть такое напоминание.")
+		}
 		h.log.Error("create reminder", "err", err)
 		return c.Respond(&tele.CallbackResponse{Text: "Ошибка сохранения."})
 	}
@@ -333,7 +342,7 @@ func (h *Handler) handleFieldInput(ctx context.Context, c tele.Context, dialog *
 	return h.askConfirmation(ctx, c, c.Sender().ID, combined, result)
 }
 
-const defaultConditionalCron = "*/15 * * * *"
+const defaultConditionalCron = "*/5 * * * *"
 
 func buildReminder(userID int64, rawText string, result *nlu.ParseResult, now time.Time) (*domain.Reminder, error) {
 	if err := validateParseResult(result); err != nil {
@@ -354,7 +363,16 @@ func buildReminder(userID int64, rawText string, result *nlu.ParseResult, now ti
 		if err != nil {
 			return nil, fmt.Errorf("parse fire_at: %w", err)
 		}
-		rem.NextEvalAt = &fireAt
+		// For anchor-triggered reminders (e.g. TV show, price drop), we need
+		// the watcher to evaluate immediately so the EPG provider can look up
+		// the real event time and compute the correct notification fire time
+		// (event_time - lead_time). If we waited until event_time, the
+		// notification window would already have passed.
+		if result.Spec.Trigger == domain.TriggerAnchor {
+			rem.NextEvalAt = PtrTime(now.UTC())
+		} else {
+			rem.NextEvalAt = &fireAt
+		}
 	case domain.KindRecurring:
 		rem.EvalCron = result.EvalCron
 		next, err := nextCronAt(result.EvalCron, now)
@@ -372,7 +390,59 @@ func buildReminder(userID int64, rawText string, result *nlu.ParseResult, now ti
 	default:
 		return nil, fmt.Errorf("unsupported reminder kind %q", kind)
 	}
+	rem.IdempotencyKey = reminderIdemKey(rem)
 	return rem, nil
+}
+
+// reminderIdemKey produces a stable key that identifies "the same reminder"
+// for a given user. Two reminders are considered identical if they track the
+// same event/cron with the same lead-time, regardless of the human-readable
+// message text.
+func reminderIdemKey(rem *domain.Reminder) string {
+	var b strings.Builder
+	b.WriteString(strconv.FormatInt(rem.UserID, 10))
+	b.WriteByte('|')
+	b.WriteString(string(rem.Kind))
+	b.WriteByte('|')
+	switch rem.Kind {
+	case domain.KindConditional:
+		b.WriteString(rem.Spec.Event.Type)
+		b.WriteByte('|')
+		b.WriteString(normalizeField(rem.Spec.Event.Title))
+		b.WriteByte('|')
+		b.WriteString(canonicalParams(rem.Spec.Event.Params))
+		b.WriteByte('|')
+		b.WriteString(rem.Spec.LeadTime.Duration.String())
+	case domain.KindAbsolute:
+		if rem.NextEvalAt != nil {
+			b.WriteString(rem.NextEvalAt.UTC().Format(time.RFC3339))
+		}
+		b.WriteByte('|')
+		b.WriteString(normalizeField(rem.Spec.Message))
+	case domain.KindRecurring:
+		b.WriteString(rem.EvalCron)
+		b.WriteByte('|')
+		b.WriteString(normalizeField(rem.Spec.Message))
+	}
+	h := sha256.Sum256([]byte(b.String()))
+	return fmt.Sprintf("%x", h[:16])
+}
+
+func normalizeField(s string) string {
+	return strings.ToLower(strings.Join(strings.Fields(s), " "))
+}
+
+func canonicalParams(params map[string]string) string {
+	keys := make([]string, 0, len(params))
+	for k := range params {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, k+"="+normalizeField(params[k]))
+	}
+	return strings.Join(parts, ",")
 }
 
 func validateParseResult(result *nlu.ParseResult) error {
@@ -448,6 +518,9 @@ func nextCronAt(expr string, now time.Time) (time.Time, error) {
 	}
 	return schedule.Next(now.In(loc)), nil
 }
+
+// PtrTime returns a pointer to the given time value.
+func PtrTime(t time.Time) *time.Time { return &t }
 
 func formatSpec(spec *domain.Spec) string {
 	if spec == nil {

@@ -5,7 +5,9 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -34,6 +36,7 @@ type Evaluator struct {
 	history        HistoryRepo
 	clock          clock.Clock
 	maxHorizonDays int
+	log            *slog.Logger
 }
 
 type providerRegistry interface {
@@ -42,12 +45,16 @@ type providerRegistry interface {
 	Search(typ string) (provider.SearchProvider, bool)
 }
 
-func NewEvaluator(registry providerRegistry, history HistoryRepo, clk clock.Clock, maxHorizonDays int) *Evaluator {
+func NewEvaluator(registry providerRegistry, history HistoryRepo, clk clock.Clock, maxHorizonDays int, log *slog.Logger) *Evaluator {
+	if log == nil {
+		log = slog.Default()
+	}
 	return &Evaluator{
 		registry:       registry,
 		history:        history,
 		clock:          clk,
 		maxHorizonDays: maxHorizonDays,
+		log:            log,
 	}
 }
 
@@ -119,10 +126,41 @@ func (e *Evaluator) evaluateAnchor(ctx context.Context, r domain.Reminder) ([]Pl
 		Params: r.Spec.Event.Params,
 	}, from, to)
 	if err != nil {
-		return nil, err
+		// Transient provider errors (DNS, network, timeouts) are treated as
+		// "no events found this tick" rather than a hard failure.  The watcher
+		// will retry on the next cron tick, which is the desired behaviour for
+		// short-lived outages — see watcher.processReminder.
+		e.log.Warn("anchor lookup transient error, will retry next tick",
+			"reminder_id", r.ID,
+			"provider", r.Spec.Event.Type,
+			"err", err,
+		)
+		return nil, nil
+	}
+	e.log.Info("anchor lookup ok",
+		"reminder_id", r.ID,
+		"title", r.Spec.Event.Title,
+		"events_found", len(events),
+		"window_from", from.Format(time.RFC3339),
+		"window_to", to.Format(time.RFC3339),
+		"now", now.Format(time.RFC3339),
+	)
+	for _, ev := range events {
+		fireAt := ev.AnchorAt.Add(-r.Spec.LeadTime.Duration)
+		e.log.Info("anchor event",
+			"reminder_id", r.ID,
+			"event_title", ev.Title,
+			"anchor_at", ev.AnchorAt.Format(time.RFC3339),
+			"fire_at", fireAt.Format(time.RFC3339),
+			"fire_in_past", fireAt.Before(now),
+			"anchor_started", !ev.AnchorAt.After(now),
+		)
 	}
 
-	var result []PlannedNotification
+	// Events are sorted ascending by AnchorAt. We want exactly one notification —
+	// for the nearest upcoming occurrence. Notifying about every occurrence in the
+	// lookahead window would flood the user; on the next evaluation tick the
+	// watcher will naturally pick up the next occurrence after this one fires.
 	for _, ev := range events {
 		fireAt := ev.AnchorAt.Add(-r.Spec.LeadTime.Duration)
 		if fireAt.Before(now) {
@@ -131,14 +169,14 @@ func (e *Evaluator) evaluateAnchor(ctx context.Context, r domain.Reminder) ([]Pl
 			}
 			fireAt = now // Lead time was missed, but the event is still upcoming.
 		}
-		key := idemKey(r.ID, "anchor:"+ev.Identity)
-		result = append(result, PlannedNotification{
+		key := userIdemKey(r.UserID, "anchor:"+ev.Identity)
+		return []PlannedNotification{{
 			FireAt:         fireAt,
-			Text:           renderAnchorText(r.Spec, ev),
+			Text:           renderAnchorText(r.Spec, ev, userTZ(r)),
 			IdempotencyKey: key,
-		})
+		}}, nil
 	}
-	return result, nil
+	return nil, nil
 }
 
 // --- threshold ---
@@ -185,7 +223,7 @@ func (e *Evaluator) evaluateThreshold(ctx context.Context, r domain.Reminder) ([
 		return nil, nil
 	}
 
-	key := idemKey(r.ID, "threshold:"+now.In(userTZ(r)).Format("2006-01-02"))
+	key := userIdemKey(r.UserID, "threshold:"+now.In(userTZ(r)).Format("2006-01-02"))
 	return []PlannedNotification{{
 		FireAt:         now,
 		Text:           renderThresholdText(r.Spec, m, prev),
@@ -227,7 +265,7 @@ func (e *Evaluator) evaluateDigest(ctx context.Context, r domain.Reminder) ([]Pl
 	})
 
 	text := renderDigest(r.Spec, top, prev, from, to)
-	key := idemKey(r.ID, "digest:"+now.In(userTZ(r)).Format("2006-01-02"))
+	key := userIdemKey(r.UserID, "digest:"+now.In(userTZ(r)).Format("2006-01-02"))
 	return []PlannedNotification{{
 		FireAt:         now,
 		Text:           text,
@@ -270,6 +308,15 @@ func idemKey(reminderID uuid.UUID, suffix string) string {
 	return fmt.Sprintf("%x", h[:16])
 }
 
+// userIdemKey produces a notification idempotency key scoped to a user rather
+// than a specific reminder. This ensures that even if a user somehow created
+// two identical reminders, only one notification row is ever inserted for the
+// same event (anchor identity, threshold date, etc.).
+func userIdemKey(userID int64, suffix string) string {
+	h := sha256.Sum256([]byte(strconv.FormatInt(userID, 10) + ":" + suffix))
+	return fmt.Sprintf("%x", h[:16])
+}
+
 func userTZ(r domain.Reminder) *time.Location {
 	// User TZ is stored on the User entity; for now default to Moscow.
 	// TODO M7: pass user TZ into Reminder or Evaluator context.
@@ -302,9 +349,31 @@ func splitModes(s string) []string {
 
 // --- text rendering ---
 
-func renderAnchorText(spec domain.Spec, ev provider.Event) string {
+func renderAnchorText(spec domain.Spec, ev provider.Event, loc *time.Location) string {
+	if spec.Event.Type == "tv_program" {
+		return renderTVProgramText(ev, loc)
+	}
 	return fmt.Sprintf("🔔 *%s* начинается через %s!\n%s",
 		ev.Title, spec.LeadTime.String(), spec.Message)
+}
+
+var ruMonths = [12]string{
+	"января", "февраля", "марта", "апреля", "мая", "июня",
+	"июля", "августа", "сентября", "октября", "ноября", "декабря",
+}
+
+func renderTVProgramText(ev provider.Event, loc *time.Location) string {
+	at := ev.AnchorAt.In(loc)
+	date := fmt.Sprintf("%d %s", at.Day(), ruMonths[at.Month()-1])
+	timeStr := at.Format("15:04")
+	channel := ev.Meta["channel"]
+	desc := ev.Meta["description"]
+
+	text := fmt.Sprintf("Телепрограмма *%s* на канале *%s* начнётся в %s, %s.", ev.Title, channel, timeStr, date)
+	if desc != "" {
+		text += " " + desc
+	}
+	return text
 }
 
 func renderThresholdText(spec domain.Spec, m provider.Measurement, prev *domain.Observation) string {

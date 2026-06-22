@@ -21,6 +21,7 @@ type NotificationStore interface {
 	LeasePending(ctx context.Context, workerID string, limit int) ([]domain.ScheduledNotification, error)
 	MarkSent(ctx context.Context, id uuid.UUID) error
 	MarkFailed(ctx context.Context, id uuid.UUID, attempts int) error
+	UpdateFireAt(ctx context.Context, id uuid.UUID, fireAt time.Time) error
 }
 
 // ReminderStore is used to resolve UserID for delivery.
@@ -94,12 +95,19 @@ func (w *Worker) deliver(ctx context.Context, n domain.ScheduledNotification) {
 	if err := w.sender.Send(ctx, rem.UserID, n.Text); err != nil {
 		attempts := n.Attempts + 1
 		w.log.Warn("send failed", "notification_id", n.ID, "attempt", attempts, "err", err)
-		_ = w.notifications.MarkFailed(ctx, n.ID, attempts)
 		observability.NotificationsFailedTotal.Inc()
 
-		// exponential backoff via fire_at update is handled implicitly by
-		// lock timeout; for explicit delay we could update fire_at here.
-		_ = backoffDuration(attempts)
+		// Apply exponential backoff by scheduling the next delivery attempt.
+		// After maxAttempts, mark as permanently failed.
+		if attempts >= maxAttempts {
+			_ = w.notifications.MarkFailed(ctx, n.ID, attempts)
+			return
+		}
+		delay := backoffDuration(attempts)
+		nextFire := time.Now().UTC().Add(delay)
+		if err := w.notifications.UpdateFireAt(ctx, n.ID, nextFire); err != nil {
+			w.log.Error("update fire_at failed", "notification_id", n.ID, "err", err)
+		}
 		return
 	}
 

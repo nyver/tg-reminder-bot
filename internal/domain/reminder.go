@@ -33,16 +33,17 @@ const (
 )
 
 type Reminder struct {
-	ID         uuid.UUID
-	UserID     int64
-	Kind       Kind
-	RawText    string
-	Spec       Spec
-	Status     Status
-	NextEvalAt *time.Time
-	EvalCron   string
-	CreatedAt  time.Time
-	UpdatedAt  time.Time
+	ID              uuid.UUID
+	UserID          int64
+	Kind            Kind
+	RawText         string
+	Spec            Spec
+	Status          Status
+	NextEvalAt      *time.Time
+	EvalCron        string
+	IdempotencyKey  string
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
 }
 
 // Spec — нормализованное намерение (хранится как jsonb).

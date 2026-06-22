@@ -81,6 +81,14 @@ func (db *DB) MinutesAgo(n int) string {
 	return fmt.Sprintf("now() - interval '%d minutes'", n)
 }
 
+// DaysAgo returns a SQL expression for N days in the past.
+func (db *DB) DaysAgo(n int) string {
+	if db.Dialect == "sqlite" {
+		return fmt.Sprintf("datetime('now', '-%d days')", n)
+	}
+	return fmt.Sprintf("now() - interval '%d days'", n)
+}
+
 // ForUpdateSkipLocked returns the FOR UPDATE SKIP LOCKED clause (empty for SQLite).
 func (db *DB) ForUpdateSkipLocked() string {
 	if db.Dialect == "sqlite" {

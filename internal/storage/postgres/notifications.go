@@ -101,6 +101,16 @@ func (r *NotificationRepo) MarkFailed(ctx context.Context, id uuid.UUID, attempt
 	return err
 }
 
+// UpdateFireAt schedules a notification for a future delivery time (used for backoff).
+func (r *NotificationRepo) UpdateFireAt(ctx context.Context, id uuid.UUID, fireAt time.Time) error {
+	_, err := r.db.ExecContext(ctx, r.db.Rebind(`
+		UPDATE scheduled_notifications
+		SET fire_at=$1, locked_at=NULL, locked_by=NULL
+		WHERE id=$2`),
+		fireAt, id.String())
+	return err
+}
+
 func (r *NotificationRepo) ListFailed(ctx context.Context, limit int) ([]domain.ScheduledNotification, error) {
 	rows, err := r.db.QueryContext(ctx, r.db.Rebind(`
 		SELECT id, reminder_id, fire_at, text, idempotency_key, status, attempts, created_at, sent_at

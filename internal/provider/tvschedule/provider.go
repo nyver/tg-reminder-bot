@@ -1,8 +1,11 @@
 package tvschedule
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -17,6 +20,15 @@ import (
 	"github.com/nyver2k/remindertgbot/internal/provider"
 )
 
+type httpError struct {
+	StatusCode int
+	Detail     string
+}
+
+func (e *httpError) Error() string {
+	return fmt.Sprintf("EPG Service HTTP %d: %.300s", e.StatusCode, e.Detail)
+}
+
 const (
 	providerType    = "tv_program"
 	maxResponseSize = 16 << 20
@@ -29,7 +41,7 @@ type Config struct {
 	Timeout time.Duration
 }
 
-// Provider looks up TV broadcasts through EPG Service API v1.
+// Provider looks up TV broadcasts through the EPG Service XMLTV API.
 type Provider struct {
 	baseURL string
 	apiKey  string
@@ -68,53 +80,57 @@ func (p *Provider) Lookup(ctx context.Context, q provider.Query, from, to time.T
 		return nil, nil
 	}
 
-	channel, err := p.resolveChannel(ctx, q.Params)
+	ch, err := p.resolveChannel(ctx, q.Params)
 	if err != nil {
 		return nil, err
 	}
-	if channel.ID == "" {
+	if ch.ID == "" {
 		return nil, nil
 	}
 
 	seen := make(map[string]struct{})
 	var result []provider.Event
 	for _, week := range weeksInRange(from, to) {
-		schedule, err := p.schedule(ctx, channel.ID, week)
+		tv, err := p.schedule(ctx, ch.ID, week)
 		if err != nil {
-			return nil, err
-		}
-		if channel.DisplayName == "" && len(schedule.Channels) > 0 {
-			channel.DisplayName = schedule.Channels[0].DisplayName
-		}
-		for _, programme := range schedule.Programmes {
-			if !matches(programme.Title, q.Title) {
+			var he *httpError
+			if errors.As(err, &he) && he.StatusCode == http.StatusNotFound {
+				p.log.Warn("tvschedule: no schedule for week, skipping", "channel_id", ch.ID, "week", week)
 				continue
 			}
-			start, ok := programme.startTime(from.Location())
+			return nil, err
+		}
+		if ch.DisplayName == "" && len(tv.Channels) > 0 {
+			ch.DisplayName = tv.Channels[0].displayName()
+		}
+		for _, prog := range tv.Programmes {
+			if !matches(prog.Title, q.Title) {
+				continue
+			}
+			start, ok := parseXMLTVTime(prog.Start)
 			if !ok || start.Before(from) || !start.Before(to) {
 				continue
 			}
-			identity := programme.EventID
-			if identity == "" {
-				identity = fmt.Sprintf("%s:%d:%s", channel.ID, start.Unix(), normalize(programme.Title))
-			}
+			identity := fmt.Sprintf("%s:%d:%s", ch.ID, start.Unix(), normalize(prog.Title))
 			if _, ok := seen[identity]; ok {
 				continue
 			}
 			seen[identity] = struct{}{}
 			meta := map[string]string{
-				"channel":    channel.DisplayName,
-				"channel_id": channel.ID,
+				"channel":    ch.DisplayName,
+				"channel_id": ch.ID,
 			}
-			if programme.StopUnix != nil {
-				meta["stop_at"] = time.Unix(*programme.StopUnix, 0).Format(time.RFC3339)
+			if prog.Stop != "" {
+				if stop, ok := parseXMLTVTime(prog.Stop); ok {
+					meta["stop_at"] = stop.UTC().Format(time.RFC3339)
+				}
 			}
-			if programme.Description != "" {
-				meta["description"] = programme.Description
+			if desc := prog.shortDesc(); desc != "" {
+				meta["description"] = desc
 			}
 			result = append(result, provider.Event{
 				Identity: identity,
-				Title:    programme.Title,
+				Title:    prog.Title,
 				AnchorAt: start,
 				Meta:     meta,
 			})
@@ -124,13 +140,76 @@ func (p *Provider) Lookup(ctx context.Context, q provider.Query, from, to time.T
 	return result, nil
 }
 
+// channel is the internal representation of a TV channel.
 type channel struct {
-	ID          string `json:"id"`
-	DisplayName string `json:"display_name"`
+	ID          string
+	DisplayName string
 }
 
-type indexResponse struct {
-	Channels []channel `json:"channel"`
+// XMLTV response types (EPG Service returns standard XMLTV XML).
+
+type xmlTV struct {
+	XMLName    xml.Name     `xml:"tv"`
+	Channels   []xmlChannel `xml:"channel"`
+	Programmes []xmlProg    `xml:"programme"`
+}
+
+type xmlChannel struct {
+	ID           string         `xml:"id,attr"`
+	DisplayNames []xmlLangValue `xml:"display-name"`
+}
+
+type xmlLangValue struct {
+	Lang  string `xml:"lang,attr"`
+	Value string `xml:",chardata"`
+}
+
+func (c xmlChannel) displayName() string {
+	// Prefer Russian, fall back to first available.
+	var first string
+	for _, d := range c.DisplayNames {
+		if first == "" {
+			first = d.Value
+		}
+		if d.Lang == "ru" || d.Lang == "" {
+			return d.Value
+		}
+	}
+	return first
+}
+
+type xmlDesc struct {
+	Size  string `xml:"size,attr"`
+	Value string `xml:",chardata"`
+}
+
+type xmlProg struct {
+	Start string    `xml:"start,attr"`
+	Stop  string    `xml:"stop,attr"`
+	Title string    `xml:"title"`
+	Descs []xmlDesc `xml:"desc"`
+}
+
+func (p xmlProg) shortDesc() string {
+	var fallback string
+	for _, d := range p.Descs {
+		if fallback == "" {
+			fallback = d.Value
+		}
+		if d.Size == "short" {
+			return d.Value
+		}
+	}
+	return fallback
+}
+
+// parseXMLTVTime parses XMLTV datetime strings: "20260621210000 +0300".
+func parseXMLTVTime(s string) (time.Time, bool) {
+	t, err := time.Parse("20060102150405 -0700", s)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t, true
 }
 
 func (p *Provider) resolveChannel(ctx context.Context, params map[string]string) (channel, error) {
@@ -158,6 +237,18 @@ func (p *Provider) resolveChannel(ctx context.Context, params map[string]string)
 			best = candidate
 		}
 	}
+	if best.ID == "" {
+		p.log.Warn("tvschedule: channel not matched", "query", name, "normalized_query", normalize(name), "index_size", len(channels))
+		if len(channels) <= 20 {
+			names := make([]string, len(channels))
+			for i, c := range channels {
+				names[i] = c.DisplayName
+			}
+			p.log.Warn("tvschedule: channel candidates", "names", names)
+		}
+	} else {
+		p.log.Info("tvschedule: channel resolved", "query", name, "normalized_query", normalize(name), "id", best.ID, "display_name", best.DisplayName, "score", bestScore)
+	}
 	return best, nil
 }
 
@@ -170,62 +261,65 @@ func (p *Provider) channelIndex(ctx context.Context) ([]channel, error) {
 	}
 	p.indexMu.RUnlock()
 
-	var index indexResponse
-	if err := p.getJSON(ctx, "/v1/index", nil, &index); err != nil {
+	var tv xmlTV
+	if err := p.getXML(ctx, "/v1/index", nil, &tv); err != nil {
 		return nil, err
 	}
+	p.log.Debug("tvschedule: index fetched", "raw_channel_count", len(tv.Channels))
+	channels := make([]channel, 0, len(tv.Channels))
+	for _, c := range tv.Channels {
+		if c.ID != "" {
+			dn := c.displayName()
+			channels = append(channels, channel{ID: c.ID, DisplayName: dn})
+			p.log.Debug("tvschedule: channel in index", "id", c.ID, "display_name", dn)
+		}
+	}
+	p.log.Info("tvschedule: channel index loaded", "total", len(channels))
 	p.indexMu.Lock()
-	p.channels = index.Channels
+	p.channels = channels
 	p.indexFetchedAt = time.Now()
 	p.indexMu.Unlock()
-	return index.Channels, nil
+	return channels, nil
 }
 
-type scheduleResponse struct {
-	Channels   []channel   `json:"channel"`
-	Programmes []programme `json:"programms"`
-}
-
-type programme struct {
-	Start       string `json:"start"`
-	StartUnix   *int64 `json:"start_ut"`
-	StopUnix    *int64 `json:"stop_ut"`
-	EventID     string `json:"event_id"`
-	Title       string `json:"title"`
-	Description string `json:"desc_short"`
-}
-
-func (p *Provider) schedule(ctx context.Context, channelID, week string) (*scheduleResponse, error) {
+func (p *Provider) schedule(ctx context.Context, channelID, week string) (*xmlTV, error) {
 	query := url.Values{"week": []string{week}}
-	var schedule scheduleResponse
+	var tv xmlTV
 	path := "/v1/schedule/" + url.PathEscape(channelID)
-	if err := p.getJSON(ctx, path, query, &schedule); err != nil {
+	if err := p.getXML(ctx, path, query, &tv); err != nil {
 		return nil, fmt.Errorf("tvschedule schedule for channel %s: %w", channelID, err)
 	}
-	return &schedule, nil
+	return &tv, nil
 }
 
-func (p *Provider) getJSON(ctx context.Context, path string, query url.Values, dst any) error {
+func (p *Provider) getXML(ctx context.Context, path string, query url.Values, dst any) error {
 	endpoint := p.baseURL + path
 	if len(query) > 0 {
 		endpoint += "?" + query.Encode()
 	}
+	p.log.Debug("tvschedule: http request", "method", "GET", "url", endpoint)
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Authorization", "Bearer "+p.apiKey)
-	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Accept", "application/xml")
 
+	start := time.Now()
 	resp, err := p.client.Do(req)
 	if err != nil {
+		p.log.Error("tvschedule: http request failed", "url", endpoint, "err", err)
 		return err
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize))
+	elapsed := time.Since(start)
 	if err != nil {
 		return err
 	}
+	p.log.Debug("tvschedule: http response", "url", endpoint, "status", resp.StatusCode, "bytes", len(body), "elapsed_ms", elapsed.Milliseconds(), "body", truncate(string(body), 4096))
+
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		var problem struct {
 			Detail string `json:"detail"`
@@ -234,24 +328,15 @@ func (p *Provider) getJSON(ctx context.Context, path string, query url.Values, d
 		if problem.Detail == "" {
 			problem.Detail = strings.TrimSpace(string(body))
 		}
-		return fmt.Errorf("EPG Service HTTP %d: %.300s", resp.StatusCode, problem.Detail)
+		p.log.Error("tvschedule: http error response", "url", endpoint, "status", resp.StatusCode, "detail", problem.Detail)
+		return &httpError{StatusCode: resp.StatusCode, Detail: problem.Detail}
 	}
-	if err := json.Unmarshal(body, dst); err != nil {
-		return fmt.Errorf("decode EPG Service response: %w", err)
+	body = bytes.TrimPrefix(body, []byte("\xef\xbb\xbf"))
+	if err := xml.Unmarshal(body, dst); err != nil {
+		p.log.Error("tvschedule: xml decode failed", "url", endpoint, "body_preview", string(body[:min(200, len(body))]))
+		return fmt.Errorf("decode EPG Service XML (HTTP %d, body: %.200s): %w", resp.StatusCode, body, err)
 	}
 	return nil
-}
-
-func (p programme) startTime(loc *time.Location) (time.Time, bool) {
-	if p.StartUnix != nil {
-		return time.Unix(*p.StartUnix, 0), true
-	}
-	for _, layout := range []string{time.RFC3339, "2006-01-02T15:04:05"} {
-		if t, err := time.ParseInLocation(layout, p.Start, loc); err == nil {
-			return t, true
-		}
-	}
-	return time.Time{}, false
 }
 
 func weeksInRange(from, to time.Time) []string {
@@ -282,6 +367,13 @@ func matchScore(value, wanted string) int {
 		return 2
 	}
 	return 0
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
 }
 
 func normalize(value string) string {

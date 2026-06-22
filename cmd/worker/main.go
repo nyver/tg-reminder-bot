@@ -15,6 +15,7 @@ import (
 	"github.com/nyver2k/remindertgbot/internal/provider"
 	"github.com/nyver2k/remindertgbot/internal/provider/price"
 	"github.com/nyver2k/remindertgbot/internal/provider/travel"
+	"github.com/nyver2k/remindertgbot/internal/provider/iptvx"
 	"github.com/nyver2k/remindertgbot/internal/provider/tvschedule"
 	"github.com/nyver2k/remindertgbot/internal/scheduler"
 	"github.com/nyver2k/remindertgbot/internal/storage/postgres"
@@ -50,12 +51,24 @@ func main() {
 	obsRepo := postgres.NewObservationRepo(db)
 
 	// Wire providers.
+	var iptvxRunner func(context.Context) error
 	registry := provider.NewRegistry()
-	registry.RegisterEvent(tvschedule.New(tvschedule.Config{
-		BaseURL: cfg.Providers.TV.BaseURL,
-		APIKey:  cfg.Providers.TV.APIKey,
-		Timeout: cfg.Providers.TV.Timeout,
-	}, log))
+	if cfg.Providers.IPTVX.URL != "" {
+		ip := iptvx.New(iptvx.Config{
+			URL:            cfg.Providers.IPTVX.URL,
+			FilePath:       cfg.Providers.IPTVX.FilePath,
+			UpdateInterval: cfg.Providers.IPTVX.UpdateInterval,
+			Timeout:        cfg.Providers.IPTVX.Timeout,
+		}, postgres.NewEPGRepo(db), log)
+		registry.RegisterEvent(ip)
+		iptvxRunner = ip.Run
+	} else {
+		registry.RegisterEvent(tvschedule.New(tvschedule.Config{
+			BaseURL: cfg.Providers.TV.BaseURL,
+			APIKey:  cfg.Providers.TV.APIKey,
+			Timeout: cfg.Providers.TV.Timeout,
+		}, log))
+	}
 	registry.RegisterMetric(price.New(cfg.Providers.Price.UserAgent, cfg.Providers.Travel.Timeout, log))
 
 	airP := travel.NewAirProvider(cfg.Providers.Travel.AirAPIKey, log)
@@ -64,7 +77,7 @@ func main() {
 	registry.RegisterSearch(agg)
 
 	// Evaluator.
-	evaluator := scheduler.NewEvaluator(registry, obsRepo, clock.Real(), cfg.Providers.Travel.MaxHorizonDays)
+	evaluator := scheduler.NewEvaluator(registry, obsRepo, clock.Real(), cfg.Providers.Travel.MaxHorizonDays, log)
 
 	workerID := workerID(cfg)
 
@@ -82,9 +95,19 @@ func main() {
 	// Delivery worker.
 	deliveryWorker := delivery.NewWorker(notifRepo, reminderRepo, sender, workerID, cfg.Scheduler.DeliveryTick, log)
 
+	janitor := scheduler.NewJanitor(
+		postgres.NewHousekeepingRepo(db),
+		cfg.Scheduler.HousekeepingTick,
+		log,
+	)
+
 	g, ctx := errgroup.WithContext(ctx)
+	if iptvxRunner != nil {
+		g.Go(func() error { return iptvxRunner(ctx) })
+	}
 	g.Go(func() error { return watcher.Run(ctx) })
 	g.Go(func() error { return deliveryWorker.Run(ctx) })
+	g.Go(func() error { return janitor.Run(ctx) })
 
 	log.Info("worker running", "worker_id", workerID)
 	if err := g.Wait(); err != nil && err != context.Canceled {
