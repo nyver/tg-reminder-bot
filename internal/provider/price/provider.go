@@ -85,10 +85,11 @@ func (p *Provider) initAlloc() {
 			chromedp.NoSandbox,
 			chromedp.Flag("disable-dev-shm-usage", true),
 			chromedp.Flag("disable-gpu", true),
-			// Crash reporter requires a writable database path which is not
-			// available in a minimal container — disable it entirely.
-			chromedp.Flag("disable-crash-reporter", true),
-			// Zygote process requires Linux namespaces; disable in containers.
+			// Run everything in one process so Chromium never forks renderer or
+			// crashpad-handler subprocesses. Without this, the Debian chromium
+			// package's crashpad handler crashes at startup in containers
+			// ("--database is required").
+			chromedp.Flag("single-process", true),
 			chromedp.Flag("no-zygote", true),
 			// Disable automation markers so JS-based WAFs cannot distinguish
 			// this browser from a real user session.
