@@ -175,7 +175,16 @@ func (p *Provider) Sample(ctx context.Context, q provider.Query) (provider.Measu
 
 	kopecks, currency, pageTitle, found := extractPrice(body)
 	if !found || kopecks <= 0 {
-		p.log.Warn("price: extraction found nothing", "url", rawURL, "headless", p.headless)
+		title := extractPageTitle(body)
+		p.log.Warn("price: extraction found nothing",
+			"url", rawURL,
+			"headless", p.headless,
+			"page_title", title,
+			"body_len", len(body),
+		)
+		if p.headless {
+			_ = os.WriteFile("/tmp/price_debug.html", body, 0o644)
+		}
 		return provider.Measurement{Available: true, Title: q.Title}, nil
 	}
 
