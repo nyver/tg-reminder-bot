@@ -42,6 +42,8 @@ var (
 			`\s+в\s+(\d{1,2})[:.](\d{2})(?::(\d{2}))?\s+(.+)`)
 
 	reEveryDay = regexp.MustCompile(`(?i)каждый?\s+день\s+в\s+(\d{1,2})[:.](\d{2})\s+(.+)`)
+
+	reURLExtract = regexp.MustCompile(`https?://\S+`)
 )
 
 func (p *FastPath) Parse(ctx context.Context, text string) (*ParseResult, error) {
@@ -50,6 +52,9 @@ func (p *FastPath) Parse(ctx context.Context, text string) (*ParseResult, error)
 	if m := reTVAnchor.FindStringSubmatch(text); m != nil {
 		return p.parseTVAnchor(m), nil
 	}
+	if r := parsePriceDrop(text); r != nil {
+		return r, nil
+	}
 	if m := reRecurring.FindStringSubmatch(text); m != nil {
 		return p.parseRecurring(m), nil
 	}
@@ -57,6 +62,39 @@ func (p *FastPath) Parse(ctx context.Context, text string) (*ParseResult, error)
 		return p.parseAbsolute(m), nil
 	}
 	return &ParseResult{Spec: &domain.Spec{}, Confidence: 0}, nil
+}
+
+// parsePriceDrop detects "URL ... уведоми при снижении цены" patterns.
+func parsePriceDrop(text string) *ParseResult {
+	u := ExtractURL(text)
+	if u == "" {
+		return nil
+	}
+	lower := strings.ToLower(text)
+	if !strings.Contains(lower, "снижени") &&
+		!strings.Contains(lower, "подешев") &&
+		!strings.Contains(lower, "цена упад") &&
+		!strings.Contains(lower, "цена снизится") {
+		return nil
+	}
+	return &ParseResult{
+		Kind: domain.KindConditional,
+		Spec: &domain.Spec{
+			Trigger: domain.TriggerThreshold,
+			Message: "Уведомить при снижении цены",
+			Event: domain.EventSpec{
+				Type:   "price",
+				Params: map[string]string{"url": u},
+			},
+		},
+		Confidence: 0.98,
+	}
+}
+
+// ExtractURL returns the first HTTP(S) URL found in s, trimming trailing punctuation.
+func ExtractURL(s string) string {
+	u := reURLExtract.FindString(s)
+	return strings.TrimRight(u, ".,;:!?)")
 }
 
 func (p *FastPath) parseTVAnchor(m []string) *ParseResult {

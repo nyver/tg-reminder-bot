@@ -97,6 +97,68 @@ func TestFastPathTVAnchorDaysAndWeeks(t *testing.T) {
 	}
 }
 
+func TestFastPathParsesURLPriceDrop(t *testing.T) {
+	t.Parallel()
+	parser := NewFastPath(time.UTC)
+
+	cases := []string{
+		"https://www.dns-shop.ru/product/abc/ - уведоми при снижении цены",
+		"https://www.dns-shop.ru/product/abc/ уведоми при снижении цены",
+		"уведоми при снижении цены https://www.dns-shop.ru/product/abc/",
+	}
+	for _, text := range cases {
+		result, err := parser.Parse(context.Background(), text)
+		if err != nil {
+			t.Fatalf("%q: %v", text, err)
+		}
+		if result.Kind != domain.KindConditional || result.Spec.Trigger != domain.TriggerThreshold {
+			t.Fatalf("%q: unexpected kind/trigger: %+v", text, result)
+		}
+		if result.Spec.Event.Type != "price" {
+			t.Fatalf("%q: event.type = %q, want price", text, result.Spec.Event.Type)
+		}
+		if got := result.Spec.Event.Params["url"]; got != "https://www.dns-shop.ru/product/abc/" {
+			t.Fatalf("%q: url = %q", text, got)
+		}
+	}
+}
+
+func TestMapToResultInfersPriceEventType(t *testing.T) {
+	resp := &llmResponse{
+		Kind:       "conditional",
+		Trigger:    "threshold",
+		Message:    "уведоми при снижении цены",
+		Confidence: 0.95,
+		Event:      llmEvent{Params: map[string]string{"url": "https://example.com/product"}},
+		// event.type intentionally missing — LLM forgot to set it
+	}
+	result, err := mapToResult(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Spec.Event.Type != "price" {
+		t.Fatalf("event.type = %q, want price", result.Spec.Event.Type)
+	}
+}
+
+func TestMapToResultRescuesURLFromMessage(t *testing.T) {
+	resp := &llmResponse{
+		Kind:       "conditional",
+		Trigger:    "threshold",
+		Message:    "https://example.com/product уведоми при снижении цены",
+		Confidence: 0.95,
+		Event:      llmEvent{Type: "price"},
+		// URL is in message, not in event.params
+	}
+	result, err := mapToResult(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := result.Spec.Event.Params["url"]; got != "https://example.com/product" {
+		t.Fatalf("url = %q", got)
+	}
+}
+
 func TestParseLeadTime(t *testing.T) {
 	cases := []struct {
 		input string

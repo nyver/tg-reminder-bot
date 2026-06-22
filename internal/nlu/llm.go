@@ -380,6 +380,28 @@ func mapToResult(resp *llmResponse) (*ParseResult, error) {
 			spec.Trigger = domain.TriggerDigest
 		}
 	}
+
+	// Reverse inference: if LLM set trigger but omitted event.type, fill it in.
+	if spec.Event.Type == "" {
+		switch spec.Trigger {
+		case domain.TriggerThreshold:
+			spec.Event.Type = "price"
+		case domain.TriggerAnchor:
+			spec.Event.Type = "tv_program"
+		case domain.TriggerDigest:
+			spec.Event.Type = "travel"
+		}
+	}
+
+	// If price reminder but URL landed in message instead of event.params, rescue it.
+	if spec.Event.Type == "price" && (spec.Event.Params == nil || spec.Event.Params["url"] == "") {
+		if u := ExtractURL(resp.Message); u != "" {
+			if spec.Event.Params == nil {
+				spec.Event.Params = make(map[string]string)
+			}
+			spec.Event.Params["url"] = u
+		}
+	}
 	if resp.LeadTime != "" {
 		if d, err := parseLeadTime(resp.LeadTime); err == nil {
 			spec.LeadTime = domain.Duration{Duration: d}
