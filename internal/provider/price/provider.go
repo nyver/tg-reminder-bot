@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/chromedp"
 	"github.com/nyver2k/remindertgbot/internal/provider"
 )
@@ -58,6 +59,9 @@ func New(userAgent string, timeout time.Duration, headless bool, log *slog.Logge
 		TLSNextProto:    make(map[string]func(string, *tls.Conn) http.RoundTripper),
 		IdleConnTimeout: 30 * time.Second,
 	}
+	if headless {
+		log.Info("price: headless mode enabled — Chromium required in runtime")
+	}
 	return &Provider{
 		httpClient: &http.Client{Timeout: timeout, Jar: jar, Transport: transport},
 		userAgent:  userAgent,
@@ -81,6 +85,10 @@ func (p *Provider) initAlloc() {
 			chromedp.NoSandbox,
 			chromedp.Flag("disable-dev-shm-usage", true),
 			chromedp.Flag("disable-gpu", true),
+			// Disable automation markers so JS-based WAFs cannot distinguish
+			// this browser from a real user session.
+			chromedp.Flag("enable-automation", false),
+			chromedp.Flag("disable-blink-features", "AutomationControlled"),
 			chromedp.UserAgent(p.userAgent),
 		)
 		p.allocCtx, p.allocCancel = chromedp.NewExecAllocator(context.Background(), opts...)
@@ -104,8 +112,18 @@ func (p *Provider) fetchPageHeadless(rawURL string) ([]byte, error) {
 
 	var html string
 	if err := chromedp.Run(tabCtx,
+		// Patch navigator.webdriver before any page script runs.
+		// This prevents JS-based WAFs (e.g. DNS-shop) from detecting headless mode.
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			_, err := page.AddScriptToEvaluateOnNewDocument(
+				`Object.defineProperty(navigator,'webdriver',{get:()=>undefined});`,
+			).Do(ctx)
+			return err
+		}),
 		chromedp.Navigate(rawURL),
-		chromedp.WaitReady("body", chromedp.ByQuery),
+		// Wait for the full page load including XHR-rendered price widgets.
+		chromedp.Poll(`document.readyState === "complete"`, nil),
+		chromedp.Sleep(2*time.Second),
 		chromedp.Evaluate(`document.documentElement.outerHTML`, &html),
 	); err != nil {
 		return nil, fmt.Errorf("headless fetch: %w", err)

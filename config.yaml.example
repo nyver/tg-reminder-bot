@@ -62,9 +62,12 @@ providers:
   price:
     # User-Agent для запросов к страницам магазинов.
     user_agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/125.0 Safari/537.36
-    # Таймаут получения страницы товара.
+    # Таймаут получения страницы товара (HTTP-режим) или загрузки в браузере (headless).
     timeout: 15s
-    # Зарезервировано для браузерного провайдера; сейчас не используется.
+    # Использовать headless Chromium для обхода WAF/TLS-фингерпринтинга.
+    # Требует Chromium в runtime-образе (docker-compose: debian:bookworm-slim + chromium).
+    # false — обычный HTTP-клиент, подходит для большинства магазинов.
+    # true  — реальный браузер, нужен для сайтов с защитой (например, DNS-shop).
     headless: false
 
   travel:
