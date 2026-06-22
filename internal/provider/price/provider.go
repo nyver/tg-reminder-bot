@@ -80,28 +80,37 @@ func (p *Provider) Close() {
 }
 
 // chromeDataDir is the fixed user-data-dir for the headless Chrome process.
-// A stable, pre-created path ensures Chromium can construct the crashpad
-// database path (user-data-dir/Crash Reports) before forking the handler.
-// Without this, the Debian chromium package passes an empty --database to
-// chrome_crashpad_handler, which then crashes at startup.
 const chromeDataDir = "/tmp/chromium-data"
+
+// chromeBin is the actual Chromium binary on Debian (not the wrapper script).
+// The wrapper /usr/bin/chromium appends --user-data-dir=${HOME}/.config/chromium
+// after our flags, overriding our value and causing crashpad to receive an
+// empty --database path. Calling the binary directly avoids this.
+const chromeBin = "/usr/lib/chromium/chromium"
 
 // initAlloc lazily starts the Chromium exec allocator (shared Chrome process).
 func (p *Provider) initAlloc() {
 	p.allocOnce.Do(func() {
-		_ = os.MkdirAll(chromeDataDir, 0o755)
+		// Pre-create both the user-data-dir and the crashpad database dir so
+		// chrome_crashpad_handler always receives a non-empty --database path.
+		_ = os.MkdirAll(chromeDataDir+"/Crash Reports", 0o755)
+
 		opts := append(chromedp.DefaultExecAllocatorOptions[:],
+			// Bypass the Debian wrapper script that would override --user-data-dir.
+			chromedp.ExecPath(chromeBin),
 			chromedp.NoSandbox,
 			chromedp.Flag("disable-dev-shm-usage", true),
 			chromedp.Flag("disable-gpu", true),
 			chromedp.Flag("no-zygote", true),
-			// Stable user-data-dir so crashpad gets a deterministic --database path.
 			chromedp.Flag("user-data-dir", chromeDataDir),
 			// Disable automation markers so JS-based WAFs cannot distinguish
 			// this browser from a real user session.
 			chromedp.Flag("enable-automation", false),
 			chromedp.Flag("disable-blink-features", "AutomationControlled"),
 			chromedp.UserAgent(p.userAgent),
+			// The service user has no home dir; set HOME so Chrome can write
+			// any remaining HOME-relative paths to a writable location.
+			chromedp.Env("HOME=/tmp"),
 		)
 		p.allocCtx, p.allocCancel = chromedp.NewExecAllocator(context.Background(), opts...)
 		p.log.Info("price: headless chrome allocator ready")
