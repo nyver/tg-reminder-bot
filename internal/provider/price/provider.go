@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -78,19 +79,24 @@ func (p *Provider) Close() {
 	}
 }
 
+// chromeDataDir is the fixed user-data-dir for the headless Chrome process.
+// A stable, pre-created path ensures Chromium can construct the crashpad
+// database path (user-data-dir/Crash Reports) before forking the handler.
+// Without this, the Debian chromium package passes an empty --database to
+// chrome_crashpad_handler, which then crashes at startup.
+const chromeDataDir = "/tmp/chromium-data"
+
 // initAlloc lazily starts the Chromium exec allocator (shared Chrome process).
 func (p *Provider) initAlloc() {
 	p.allocOnce.Do(func() {
+		_ = os.MkdirAll(chromeDataDir, 0o755)
 		opts := append(chromedp.DefaultExecAllocatorOptions[:],
 			chromedp.NoSandbox,
 			chromedp.Flag("disable-dev-shm-usage", true),
 			chromedp.Flag("disable-gpu", true),
-			// Run everything in one process so Chromium never forks renderer or
-			// crashpad-handler subprocesses. Without this, the Debian chromium
-			// package's crashpad handler crashes at startup in containers
-			// ("--database is required").
-			chromedp.Flag("single-process", true),
 			chromedp.Flag("no-zygote", true),
+			// Stable user-data-dir so crashpad gets a deterministic --database path.
+			chromedp.Flag("user-data-dir", chromeDataDir),
 			// Disable automation markers so JS-based WAFs cannot distinguish
 			// this browser from a real user session.
 			chromedp.Flag("enable-automation", false),
