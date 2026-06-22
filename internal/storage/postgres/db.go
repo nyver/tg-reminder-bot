@@ -26,19 +26,35 @@ func New(ctx context.Context, driver, dsn string) (*DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
+	if driver == "sqlite" {
+		// PRAGMAs are connection-local, so configure and retain one connection.
+		// This also serializes writers within each process.
+		sqldb.SetMaxOpenConns(1)
+		sqldb.SetMaxIdleConns(1)
+		// Ping may read the database header and encounter another process' startup
+		// lock, so busy_timeout must be the very first operation on the connection.
+		if _, err := sqldb.ExecContext(ctx, `PRAGMA busy_timeout=30000`); err != nil {
+			_ = sqldb.Close()
+			return nil, fmt.Errorf("sqlite busy timeout: %w", err)
+		}
+	}
 	if err := sqldb.PingContext(ctx); err != nil {
 		_ = sqldb.Close()
 		return nil, fmt.Errorf("ping db: %w", err)
 	}
 	if driver == "sqlite" {
-		// SQLite PRAGMAs are connection-local. A single connection also prevents
-		// database/sql from creating competing writers inside one process.
-		sqldb.SetMaxOpenConns(1)
-		// WAL mode improves concurrent reads; busy_timeout reduces write contention.
-		if _, err := sqldb.ExecContext(ctx,
-			`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON`); err != nil {
-			_ = sqldb.Close()
-			return nil, fmt.Errorf("sqlite pragmas: %w", err)
+		// Switching/checking WAL may itself need a lock while another service is
+		// opening or migrating the same database.
+		for _, pragma := range []string{
+			`PRAGMA journal_mode=WAL`,
+			`PRAGMA foreign_keys=ON`,
+		} {
+			if _, err := sqldb.ExecContext(ctx, pragma); err == nil {
+				continue
+			} else {
+				_ = sqldb.Close()
+				return nil, fmt.Errorf("sqlite pragma %q: %w", pragma, err)
+			}
 		}
 	}
 	return &DB{DB: sqldb, Dialect: driver}, nil
