@@ -135,7 +135,6 @@ func (p *Provider) fetchPageHeadless(rawURL string) ([]byte, error) {
 	var html string
 	if err := chromedp.Run(tabCtx,
 		// Patch navigator.webdriver before any page script runs.
-		// This prevents JS-based WAFs (e.g. DNS-shop) from detecting headless mode.
 		chromedp.ActionFunc(func(ctx context.Context) error {
 			_, err := page.AddScriptToEvaluateOnNewDocument(
 				`Object.defineProperty(navigator,'webdriver',{get:()=>undefined});`,
@@ -143,8 +142,28 @@ func (p *Provider) fetchPageHeadless(rawURL string) ([]byte, error) {
 			return err
 		}),
 		chromedp.Navigate(rawURL),
-		// Wait for the full page load including XHR-rendered price widgets.
+		chromedp.WaitReady("body", chromedp.ByQuery),
 		chromedp.Poll(`document.readyState === "complete"`, nil),
+		// Handle WAF JS challenges (Qrator, Cloudflare, etc.).
+		// The challenge page runs JS, sets a validation cookie, then redirects
+		// back to the original URL. We detect the challenge and wait for the
+		// redirect + real page load before extracting HTML.
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			var isChallenge bool
+			if err := chromedp.Evaluate(
+				`!!document.querySelector('script[src*="__qrator"], #cf-challenge-running, .cf-browser-verification')`,
+				&isChallenge,
+			).Do(ctx); err != nil || !isChallenge {
+				return nil // not a challenge page, continue
+			}
+			// Poll until the challenge redirects and the real page is loaded.
+			return chromedp.Poll(
+				`!document.querySelector('script[src*="__qrator"], #cf-challenge-running, .cf-browser-verification') `+
+					`&& document.readyState === "complete"`,
+				nil,
+			).Do(ctx)
+		}),
+		// Extra wait for XHR-rendered price widgets after full page load.
 		chromedp.Sleep(2*time.Second),
 		chromedp.Evaluate(`document.documentElement.outerHTML`, &html),
 	); err != nil {
@@ -175,16 +194,12 @@ func (p *Provider) Sample(ctx context.Context, q provider.Query) (provider.Measu
 
 	kopecks, currency, pageTitle, found := extractPrice(body)
 	if !found || kopecks <= 0 {
-		title := extractPageTitle(body)
 		p.log.Warn("price: extraction found nothing",
 			"url", rawURL,
 			"headless", p.headless,
-			"page_title", title,
+			"page_title", extractPageTitle(body),
 			"body_len", len(body),
 		)
-		if p.headless {
-			_ = os.WriteFile("/tmp/price_debug.html", body, 0o644)
-		}
 		return provider.Measurement{Available: true, Title: q.Title}, nil
 	}
 
