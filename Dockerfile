@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-FROM golang:1.25-bookworm AS build
+FROM golang:1.26-bookworm AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod go mod download
@@ -17,7 +17,16 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     mkdir -p /data-init; \
     touch /data-init/.keep
 
-FROM gcr.io/distroless/static-debian12:nonroot AS runtime
+# debian-slim instead of distroless: required for Chromium (headless price scraping).
+# Set price.headless: false in config.yaml to keep the lightweight behaviour.
+FROM debian:bookworm-slim AS runtime
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        chromium \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system --gid 65532 nonroot \
+    && useradd  --system --uid 65532 --gid nonroot --no-create-home nonroot
 WORKDIR /app
 COPY --from=build /out/ /usr/local/bin/
 COPY --from=build --chown=nonroot:nonroot /data-init/ /data/

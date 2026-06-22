@@ -550,7 +550,7 @@ func (h *Handler) formatConfirmSpec(ctx context.Context, result *nlu.ParseResult
 		return base
 	}
 
-	priceCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	priceCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
 	m, err := h.prices.Sample(priceCtx, provider.Query{
@@ -559,10 +559,10 @@ func (h *Handler) formatConfirmSpec(ctx context.Context, result *nlu.ParseResult
 	})
 	if err != nil {
 		h.log.Warn("price probe for confirmation failed", "err", err)
-		return base
+		return base + "⚠️ _Текущую цену не удалось получить_\n"
 	}
 	if !m.Available || m.Value <= 0 {
-		return base
+		return base + "⚠️ _Текущую цену не удалось получить_\n"
 	}
 
 	// Update spec title from page if NLU left it empty.
@@ -578,7 +578,8 @@ func (h *Handler) formatConfirmSpec(ctx context.Context, result *nlu.ParseResult
 	sb.WriteString(fmt.Sprintf("💰 Текущая цена: *%s*\n", formatPriceRub(m.Value, m.Currency)))
 	sb.WriteString("📉 Уведомить при снижении цены\n")
 	if u := spec.Event.Params["url"]; u != "" {
-		sb.WriteString(fmt.Sprintf("🔗 %s\n", escapeMarkdown(u)))
+		// URL is not escaped: '-' and '.' are not special chars in ModeMarkdown.
+		sb.WriteString("🔗 " + u + "\n")
 	}
 	return sb.String()
 }
@@ -937,7 +938,10 @@ func formatSpec(spec *domain.Spec) string {
 	var sb strings.Builder
 	if spec.Event.Title != "" {
 		sb.WriteString("📌 *" + escapeMarkdown(spec.Event.Title) + "*\n")
-	} else if spec.Message != "" {
+	} else if spec.Message != "" && spec.Trigger != domain.TriggerThreshold {
+		// For price reminders the meaningful title is the product name from the page,
+		// shown in the enriched confirmation path. In the fallback path the generic
+		// message just duplicates the "📉 Уведомить при снижении цены" line below.
 		sb.WriteString("📌 *" + escapeMarkdown(spec.Message) + "*\n")
 	}
 	switch spec.Trigger {
@@ -950,7 +954,8 @@ func formatSpec(spec *domain.Spec) string {
 		}
 	case domain.TriggerThreshold:
 		if u := spec.Event.Params["url"]; u != "" {
-			sb.WriteString("🔗 " + escapeMarkdown(u) + "\n")
+			// URL is not escaped: '-' and '.' are not special chars in ModeMarkdown.
+			sb.WriteString("🔗 " + u + "\n")
 		}
 		sb.WriteString("📉 Уведомить при снижении цены\n")
 	case domain.TriggerDigest:

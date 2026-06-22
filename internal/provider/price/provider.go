@@ -16,8 +16,10 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/chromedp/chromedp"
 	"github.com/nyver2k/remindertgbot/internal/provider"
 )
 
@@ -30,13 +32,21 @@ const (
 
 // Provider implements provider.MetricProvider by scraping product pages.
 // Extraction strategy: JSON-LD → OG meta → microdata.
+// When headless=true a real Chromium browser is used, bypassing TLS-fingerprint WAFs.
 type Provider struct {
 	httpClient *http.Client
 	userAgent  string
+	timeout    time.Duration
+	headless   bool
 	log        *slog.Logger
+
+	// Headless browser resources. Lazily initialized on first headless request.
+	allocOnce   sync.Once
+	allocCtx    context.Context
+	allocCancel context.CancelFunc
 }
 
-func New(userAgent string, timeout time.Duration, log *slog.Logger) *Provider {
+func New(userAgent string, timeout time.Duration, headless bool, log *slog.Logger) *Provider {
 	if timeout <= 0 {
 		timeout = 15 * time.Second
 	}
@@ -51,8 +61,56 @@ func New(userAgent string, timeout time.Duration, log *slog.Logger) *Provider {
 	return &Provider{
 		httpClient: &http.Client{Timeout: timeout, Jar: jar, Transport: transport},
 		userAgent:  userAgent,
+		timeout:    timeout,
+		headless:   headless,
 		log:        log,
 	}
+}
+
+// Close releases the headless browser allocator (if started).
+func (p *Provider) Close() {
+	if p.allocCancel != nil {
+		p.allocCancel()
+	}
+}
+
+// initAlloc lazily starts the Chromium exec allocator (shared Chrome process).
+func (p *Provider) initAlloc() {
+	p.allocOnce.Do(func() {
+		opts := append(chromedp.DefaultExecAllocatorOptions[:],
+			chromedp.NoSandbox,
+			chromedp.Flag("disable-dev-shm-usage", true),
+			chromedp.Flag("disable-gpu", true),
+			chromedp.UserAgent(p.userAgent),
+		)
+		p.allocCtx, p.allocCancel = chromedp.NewExecAllocator(context.Background(), opts...)
+		p.log.Info("price: headless chrome allocator ready")
+	})
+}
+
+// fetchPageHeadless opens a new browser tab, navigates to rawURL, and returns
+// the full page HTML. The Chrome process is shared across calls (started once).
+func (p *Provider) fetchPageHeadless(rawURL string) ([]byte, error) {
+	p.initAlloc()
+
+	// Each request gets its own tab; the underlying Chrome process is shared.
+	tabCtx, cancel := chromedp.NewContext(p.allocCtx,
+		chromedp.WithLogf(func(string, ...interface{}) {}), // suppress CDP noise
+	)
+	defer cancel()
+
+	tabCtx, timeoutCancel := context.WithTimeout(tabCtx, p.timeout)
+	defer timeoutCancel()
+
+	var html string
+	if err := chromedp.Run(tabCtx,
+		chromedp.Navigate(rawURL),
+		chromedp.WaitReady("body", chromedp.ByQuery),
+		chromedp.Evaluate(`document.documentElement.outerHTML`, &html),
+	); err != nil {
+		return nil, fmt.Errorf("headless fetch: %w", err)
+	}
+	return []byte(html), nil
 }
 
 func (p *Provider) Type() string { return providerType }
@@ -66,36 +124,18 @@ func (p *Provider) Sample(ctx context.Context, q provider.Query) (provider.Measu
 		return provider.Measurement{}, fmt.Errorf("price provider: %w", err)
 	}
 
-	body, status, err := p.fetchPage(ctx, rawURL, "")
+	body, err := p.fetchBody(ctx, rawURL)
 	if err != nil {
 		return provider.Measurement{}, err
 	}
-	if status == http.StatusUnauthorized || status == http.StatusForbidden {
-		// Pre-warm the session by visiting the site root so the cookie jar
-		// captures any session cookies the WAF sets, then retry with a Referer.
-		rootURL := p.warmSession(ctx, rawURL)
-		body, status, err = p.fetchPage(ctx, rawURL, rootURL)
-		if err != nil {
-			return provider.Measurement{}, err
-		}
-	}
-	if status == http.StatusNotFound {
+	if body == nil {
+		// HTTP path returned a non-200 that we treat as "unavailable".
 		return provider.Measurement{Available: false}, nil
-	}
-	if status == http.StatusUnauthorized || status == http.StatusForbidden {
-		// Site is actively blocking this client (likely TLS fingerprint or IP reputation).
-		// Mark as temporarily unavailable so the evaluator skips this tick and retries
-		// next cycle rather than hard-failing the reminder.
-		p.log.Warn("price: access denied, will retry next tick", "url", rawURL, "status", status)
-		return provider.Measurement{Available: false}, nil
-	}
-	if status >= 400 {
-		return provider.Measurement{}, fmt.Errorf("price fetch: HTTP %d", status)
 	}
 
 	kopecks, currency, pageTitle, found := extractPrice(body)
 	if !found || kopecks <= 0 {
-		p.log.Warn("price: extraction found nothing", "url", rawURL)
+		p.log.Warn("price: extraction found nothing", "url", rawURL, "headless", p.headless)
 		return provider.Measurement{Available: true, Title: q.Title}, nil
 	}
 
@@ -104,13 +144,47 @@ func (p *Provider) Sample(ctx context.Context, q provider.Query) (provider.Measu
 		title = pageTitle
 	}
 
-	p.log.Info("price: sampled", "url", rawURL, "kopecks", kopecks, "currency", currency, "title", title)
+	p.log.Info("price: sampled", "url", rawURL, "kopecks", kopecks, "currency", currency, "title", title, "headless", p.headless)
 	return provider.Measurement{
 		Value:     kopecks,
 		Currency:  currency,
 		Available: true,
 		Title:     title,
 	}, nil
+}
+
+// fetchBody returns the page HTML. Returns (nil, nil) when the page is
+// temporarily unavailable (401/403/404) so the caller can return Available=false
+// without treating it as an error.
+func (p *Provider) fetchBody(ctx context.Context, rawURL string) ([]byte, error) {
+	if p.headless {
+		return p.fetchPageHeadless(rawURL)
+	}
+
+	body, status, err := p.fetchPage(ctx, rawURL, "")
+	if err != nil {
+		return nil, err
+	}
+	if status == http.StatusUnauthorized || status == http.StatusForbidden {
+		// Pre-warm the session by visiting the site root so the cookie jar
+		// captures any session cookies the WAF sets, then retry with a Referer.
+		rootURL := p.warmSession(ctx, rawURL)
+		body, status, err = p.fetchPage(ctx, rawURL, rootURL)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if status == http.StatusNotFound {
+		return nil, nil
+	}
+	if status == http.StatusUnauthorized || status == http.StatusForbidden {
+		p.log.Warn("price: access denied, will retry next tick", "url", rawURL, "status", status)
+		return nil, nil
+	}
+	if status >= 400 {
+		return nil, fmt.Errorf("price fetch: HTTP %d", status)
+	}
+	return body, nil
 }
 
 // fetchPage performs a browser-like GET and returns (body, statusCode, error).
