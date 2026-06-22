@@ -1,6 +1,7 @@
 package price
 
 import (
+	"bytes"
 	"compress/gzip"
 	"context"
 	"crypto/tls"
@@ -325,7 +326,8 @@ func (p *Provider) warmSession(ctx context.Context, rawURL string) string {
 
 // --- price extraction ---
 
-// extractPrice tries three strategies in order and returns on first success.
+// extractPrice tries four strategies in order and returns on first success:
+// JSON-LD → OG meta → microdata → script JSON (DataLayer / inline state).
 func extractPrice(body []byte) (kopecks int64, currency, title string, ok bool) {
 	if p, c, t, found := extractJSONLD(body); found {
 		return p, c, t, true
@@ -334,6 +336,9 @@ func extractPrice(body []byte) (kopecks int64, currency, title string, ok bool) 
 		return p, c, extractPageTitle(body), true
 	}
 	if p, c, found := extractMicrodata(body); found {
+		return p, c, extractPageTitle(body), true
+	}
+	if p, c, found := extractScriptJSON(body); found {
 		return p, c, extractPageTitle(body), true
 	}
 	return 0, "", "", false
@@ -397,16 +402,17 @@ func parseJSONLDNodes(data []byte) []jsonLDNode {
 
 func priceFromNode(node jsonLDNode) (kopecks int64, currency, title string, ok bool) {
 	t := strings.ToLower(node.Type)
-	if t != "product" && t != "https://schema.org/product" {
+	if t != "product" && t != "https://schema.org/product" && t != "http://schema.org/product" {
 		return 0, "", "", false
 	}
 	if node.Offers == nil {
 		return 0, "", "", false
 	}
 
-	// offers can be a single object or an array.
+	// offers can be a single object or an array; trim whitespace before check.
 	var offers []jsonLDOffer
-	if len(node.Offers) > 0 && node.Offers[0] == '[' {
+	trimmed := bytes.TrimSpace(node.Offers)
+	if len(trimmed) > 0 && trimmed[0] == '[' {
 		_ = json.Unmarshal(node.Offers, &offers)
 	} else {
 		var single jsonLDOffer
@@ -508,6 +514,37 @@ func extractMicrodata(body []byte) (kopecks int64, currency string, ok bool) {
 			if err == nil && p > 0 {
 				return p, "RUB", true
 			}
+		}
+	}
+	return 0, "", false
+}
+
+// --- Strategy 4: script JSON (DataLayer, inline state, custom JSON blobs) ---
+
+// reScriptBlock matches any <script> tag content (not just ld+json).
+var reScriptBlock = regexp.MustCompile(`(?is)<script[^>]*>(.*?)</script>`)
+
+// rePriceKV matches common price key–value patterns in JSON or JS literals:
+//
+//	"price": 12990       "price":"12990.50"
+//	"currentPrice":9990  "salePrice" : "8 990"
+var rePriceKV = regexp.MustCompile(`(?i)"(?:price|currentPrice|salePrice|actualPrice|priceValue|basePrice)"\s*:\s*"?([\d][\d\s.,]*)`)
+
+func extractScriptJSON(body []byte) (kopecks int64, currency string, ok bool) {
+	for _, m := range reScriptBlock.FindAllSubmatch(body, -1) {
+		if len(m) < 2 {
+			continue
+		}
+		for _, pm := range rePriceKV.FindAllSubmatch(m[1], -1) {
+			if len(pm) < 2 {
+				continue
+			}
+			p, _, err := ParsePrice(string(pm[1]))
+			// Sanity-check: 10 RUB – 10 000 000 RUB (1 000 – 1 000 000 000 kopecks).
+			if err != nil || p < 1_000 || p > 1_000_000_000 {
+				continue
+			}
+			return p, "RUB", true
 		}
 	}
 	return 0, "", false
