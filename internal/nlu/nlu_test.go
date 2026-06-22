@@ -64,3 +64,68 @@ func TestFastPathParsesTVAnchorReminder(t *testing.T) {
 		t.Fatalf("channel = %q", got)
 	}
 }
+
+func TestFastPathTVAnchorDaysAndWeeks(t *testing.T) {
+	parser := NewFastPath(time.UTC)
+	cases := []struct {
+		text     string
+		leadTime time.Duration
+	}{
+		{"уведоми за 1 день до КВН на Первом канале", 24 * time.Hour},
+		{"уведоми за 3 дня до КВН на Первом канале", 3 * 24 * time.Hour},
+		{"уведоми за 5 дней до КВН на Первом канале", 5 * 24 * time.Hour},
+		{"уведоми за 1 неделю до КВН на Первом канале", 7 * 24 * time.Hour},
+		{"уведоми за 2 недели до КВН на Первом канале", 14 * 24 * time.Hour},
+	}
+	for _, tc := range cases {
+		result, err := parser.Parse(context.Background(), tc.text)
+		if err != nil {
+			t.Fatalf("%q: %v", tc.text, err)
+		}
+		if result.Kind != domain.KindConditional || result.Spec.Trigger != domain.TriggerAnchor {
+			t.Fatalf("%q: unexpected kind/trigger: %+v", tc.text, result)
+		}
+		if result.Spec.LeadTime.Duration != tc.leadTime {
+			t.Fatalf("%q: lead_time = %v, want %v", tc.text, result.Spec.LeadTime.Duration, tc.leadTime)
+		}
+		if result.Spec.Event.Title != "КВН" {
+			t.Fatalf("%q: title = %q", tc.text, result.Spec.Event.Title)
+		}
+		if got := result.Spec.Event.Params["channel"]; got != "Первый канал" {
+			t.Fatalf("%q: channel = %q", tc.text, got)
+		}
+	}
+}
+
+func TestParseLeadTime(t *testing.T) {
+	cases := []struct {
+		input string
+		want  time.Duration
+		ok    bool
+	}{
+		{"3h", 3 * time.Hour, true},
+		{"30m", 30 * time.Minute, true},
+		{"24h", 24 * time.Hour, true},
+		{"168h", 168 * time.Hour, true},
+		{"1d", 24 * time.Hour, true},
+		{"7d", 7 * 24 * time.Hour, true},
+		{"1w", 7 * 24 * time.Hour, true},
+		{"2w", 14 * 24 * time.Hour, true},
+		{"7 days", 7 * 24 * time.Hour, true},
+		{"1 week", 7 * 24 * time.Hour, true},
+		{"1 день", 24 * time.Hour, true},
+		{"1 неделю", 7 * 24 * time.Hour, true},
+		{"2 недели", 14 * 24 * time.Hour, true},
+		{"", 0, false},
+		{"abc", 0, false},
+	}
+	for _, tc := range cases {
+		got, err := parseLeadTime(tc.input)
+		if tc.ok && (err != nil || got != tc.want) {
+			t.Errorf("parseLeadTime(%q) = %v, %v; want %v, nil", tc.input, got, err, tc.want)
+		}
+		if !tc.ok && err == nil {
+			t.Errorf("parseLeadTime(%q) expected error, got %v", tc.input, got)
+		}
+	}
+}

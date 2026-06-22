@@ -195,6 +195,45 @@ func callOpenRouterModel(
 	return "", false, lastErr
 }
 
+// parseLeadTime parses lead_time strings from LLM output.
+// Accepts standard Go durations ("3h", "30m") and common shorthands:
+// "Nd" → N days, "Nw" → N weeks, "N day(s)", "N week(s)", "N час/день/неделю".
+func parseLeadTime(s string) (time.Duration, error) {
+	s = strings.TrimSpace(s)
+	if d, err := time.ParseDuration(s); err == nil {
+		return d, nil
+	}
+	// Try "Nd" / "Nw" shorthands.
+	if len(s) > 1 {
+		suffix := strings.ToLower(s[len(s)-1:])
+		var n int
+		if _, err := fmt.Sscanf(s[:len(s)-1], "%d", &n); err == nil && n > 0 {
+			switch suffix {
+			case "d":
+				return time.Duration(n) * 24 * time.Hour, nil
+			case "w":
+				return time.Duration(n) * 7 * 24 * time.Hour, nil
+			}
+		}
+	}
+	// Try patterns like "7 days", "1 week", "1 день", "1 неделю".
+	var n int
+	var unit string
+	if _, err := fmt.Sscanf(s, "%d %s", &n, &unit); err == nil && n > 0 {
+		switch strings.ToLower(unit) {
+		case "day", "days", "день", "дня", "дней":
+			return time.Duration(n) * 24 * time.Hour, nil
+		case "week", "weeks", "неделю", "недели", "недель":
+			return time.Duration(n) * 7 * 24 * time.Hour, nil
+		case "hour", "hours", "час", "часа", "часов":
+			return time.Duration(n) * time.Hour, nil
+		case "minute", "minutes", "минуту", "минуты", "минут":
+			return time.Duration(n) * time.Minute, nil
+		}
+	}
+	return 0, fmt.Errorf("cannot parse lead_time %q", s)
+}
+
 func retryAfter(value string) (time.Duration, bool) {
 	if value == "" {
 		return 0, false
@@ -271,7 +310,7 @@ func buildPrompt(text string, now time.Time) string {
   message     текст напоминания               (обязательно)
   fire_at     RFC3339                         (для absolute)
   eval_cron   "0 9 * * *"                     (для recurring/conditional)
-  lead_time   "3h"                            (для anchor)
+  lead_time   "3h"  "24h" "168h"              (для anchor: часы; день=24h, неделя=168h)
   top_n       5                               (для digest)
   horizon_days 30                             (для digest/anchor)
   event.type  tv_program|price|travel         (для conditional)
@@ -283,7 +322,9 @@ func buildPrompt(text string, now time.Time) string {
 Правила:
 - «напомни завтра в 9:00 текст» → kind=absolute, fire_at=RFC3339
 - «каждый день в 9:00» → kind=recurring, eval_cron="0 9 * * *"
-- «за 3 часа до КВН на Первом» → kind=conditional, trigger=anchor, event.type=tv_program, event.params.channel="Первый канал"
+- «за 3 часа до КВН на Первом» → kind=conditional, trigger=anchor, lead_time="3h", event.type=tv_program, event.title="КВН", event.params.channel="Первый канал"
+- «за 1 день до КВН на Первом» → kind=conditional, trigger=anchor, lead_time="24h", event.type=tv_program, event.title="КВН", event.params.channel="Первый канал"
+- «за 1 неделю до КВН на Первом» → kind=conditional, trigger=anchor, lead_time="168h", event.type=tv_program, event.title="КВН", event.params.channel="Первый канал"
 - «уведоми при снижении цены» + URL → kind=conditional, trigger=threshold, event.type=price, event.params.url=<URL>, event.title=название из текста или URL-slug (опусти если неясно)
 - «5 дешёвых билетов СПб→Калининград» → kind=conditional, trigger=digest, event.type=travel
 - horizon_days: «неделя»→7, «месяц»→30, «2 недели»→14, default→30
@@ -340,8 +381,7 @@ func mapToResult(resp *llmResponse) (*ParseResult, error) {
 		}
 	}
 	if resp.LeadTime != "" {
-		d, err := time.ParseDuration(resp.LeadTime)
-		if err == nil {
+		if d, err := parseLeadTime(resp.LeadTime); err == nil {
 			spec.LeadTime = domain.Duration{Duration: d}
 		}
 	}

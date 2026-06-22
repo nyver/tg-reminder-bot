@@ -27,7 +27,7 @@ func NewFastPath(loc *time.Location) *FastPath {
 var (
 	reTVAnchor = regexp.MustCompile(
 		`(?i)(?:уведоми|напомни)(?:\s+мне)?\s+за\s+(\d+)\s*` +
-			`(час(?:а|ов)?|минут(?:у|ы)?|день|дня|дней)\s+до\s+` +
+			`(час(?:а|ов)?|минут(?:у|ы)?|недел(?:ю|и|ь)|день|дня|дней)\s+до\s+` +
 			`(?:программы\s+|передачи\s+)?["«]?(.+?)["»]?\s+на\s+(.+?)\s*$`)
 
 	reAbsolute = regexp.MustCompile(
@@ -67,6 +67,8 @@ func (p *FastPath) parseTVAnchor(m []string) *ParseResult {
 		unit = time.Minute
 	case "день", "дня", "дней":
 		unit = 24 * time.Hour
+	case "неделю", "недели", "недель":
+		unit = 7 * 24 * time.Hour
 	}
 	title := strings.Trim(strings.TrimSpace(m[3]), `"«»`)
 	channel := normalizeTVChannel(m[4])

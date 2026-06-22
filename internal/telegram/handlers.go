@@ -746,14 +746,68 @@ func formatSpec(spec *domain.Spec) string {
 	var sb strings.Builder
 	if spec.Event.Title != "" {
 		sb.WriteString("📌 *" + escapeMarkdown(spec.Event.Title) + "*\n")
+	} else if spec.Message != "" {
+		sb.WriteString("📌 *" + escapeMarkdown(spec.Message) + "*\n")
 	}
-	if spec.Message != "" {
-		sb.WriteString(escapeMarkdown(spec.Message) + "\n")
-	}
-	if spec.Trigger != "" {
-		sb.WriteString(fmt.Sprintf("Тип: `%s`\n", spec.Trigger))
+	switch spec.Trigger {
+	case domain.TriggerAnchor:
+		if ch := spec.Event.Params["channel"]; ch != "" {
+			sb.WriteString("📺 " + escapeMarkdown(ch) + "\n")
+		}
+		if spec.LeadTime.Duration > 0 {
+			sb.WriteString("⏰ Уведомить за " + escapeMarkdown(formatDurationRu(spec.LeadTime.Duration)) + " до начала\n")
+		}
+	case domain.TriggerThreshold:
+		if u := spec.Event.Params["url"]; u != "" {
+			sb.WriteString("🔗 " + escapeMarkdown(u) + "\n")
+		}
+		sb.WriteString("📉 Уведомить при снижении цены\n")
+	case domain.TriggerDigest:
+		if spec.TopN > 0 {
+			sb.WriteString(fmt.Sprintf("📋 Топ\\-%d предложений\n", spec.TopN))
+		}
+		if spec.HorizonDays > 0 {
+			sb.WriteString(fmt.Sprintf("📅 Горизонт: %d дн\\.\n", spec.HorizonDays))
+		}
+	default:
+		if spec.Message != "" && spec.Event.Title != spec.Message {
+			sb.WriteString(escapeMarkdown(spec.Message) + "\n")
+		}
 	}
 	return sb.String()
+}
+
+// formatDurationRu converts a duration to a human-readable Russian string.
+func formatDurationRu(d time.Duration) string {
+	switch {
+	case d%(7*24*time.Hour) == 0:
+		n := int(d / (7 * 24 * time.Hour))
+		return fmt.Sprintf("%d %s", n, pluralRu(n, "неделю", "недели", "недель"))
+	case d%(24*time.Hour) == 0:
+		n := int(d / (24 * time.Hour))
+		return fmt.Sprintf("%d %s", n, pluralRu(n, "день", "дня", "дней"))
+	case d%time.Hour == 0:
+		n := int(d / time.Hour)
+		return fmt.Sprintf("%d %s", n, pluralRu(n, "час", "часа", "часов"))
+	default:
+		n := int(d / time.Minute)
+		return fmt.Sprintf("%d %s", n, pluralRu(n, "минуту", "минуты", "минут"))
+	}
+}
+
+func pluralRu(n int, one, few, many string) string {
+	n = n % 100
+	if n >= 11 && n <= 19 {
+		return many
+	}
+	switch n % 10 {
+	case 1:
+		return one
+	case 2, 3, 4:
+		return few
+	default:
+		return many
+	}
 }
 
 func fieldPrompt(field string) string {
