@@ -210,18 +210,13 @@ func (h *Handler) handleTV(c tele.Context) error {
 	args := strings.TrimSpace(c.Message().Payload)
 	if args == "" {
 		return c.Send(
-			"Использование:\n`/tv КВН` — расписание на всех каналах\n`/tv КВН | Первый канал` — только на заданном канале",
+			"Использование:\n"+
+				"`/tv КВН` — расписание на всех каналах\n"+
+				"`/tv КВН | Первый канал` — только на заданном канале\n"+
+				"`/tv | Первый канал` — программа канала на сегодня\n"+
+				"`/tv | Первый канал 25.06` — программа канала на дату",
 			tele.ModeMarkdown,
 		)
-	}
-
-	title, channel := args, ""
-	if i := strings.Index(args, " | "); i >= 0 {
-		title = strings.TrimSpace(args[:i])
-		channel = strings.TrimSpace(args[i+3:])
-	}
-	if title == "" {
-		return c.Send("Укажите название программы.")
 	}
 
 	ctx := context.Background()
@@ -232,6 +227,20 @@ func (h *Handler) handleTV(c tele.Context) error {
 		if l, err := time.LoadLocation(u.TZ); err == nil {
 			loc = l
 		}
+	}
+
+	title, channel := args, ""
+	if i := strings.Index(args, " | "); i >= 0 {
+		title = strings.TrimSpace(args[:i])
+		channel = strings.TrimSpace(args[i+3:])
+	}
+
+	// Empty title + channel → full channel day schedule.
+	if title == "" {
+		if channel == "" {
+			return c.Send("Укажите канал: `/tv | Первый канал`", tele.ModeMarkdown)
+		}
+		return h.handleTVChannelDay(ctx, c, channel, time.Now(), loc)
 	}
 
 	now := time.Now()
@@ -269,6 +278,94 @@ func (h *Handler) handleTV(c tele.Context) error {
 	}
 
 	return c.Send(sb.String(), tele.ModeMarkdownV2)
+}
+
+// handleTVChannelDay shows the full programme schedule for a channel on a given day.
+// channelArg may include an optional date suffix: "Первый канал 25.06" or "Первый канал завтра".
+func (h *Handler) handleTVChannelDay(ctx context.Context, c tele.Context, channelArg string, now time.Time, loc *time.Location) error {
+	channel, day := parseChannelAndDate(channelArg, now, loc)
+	if channel == "" {
+		return c.Send("Укажите название канала.")
+	}
+
+	from := time.Date(day.Year(), day.Month(), day.Day(), 0, 0, 0, 0, loc)
+	to := from.Add(24 * time.Hour)
+
+	chName, shows, err := h.schedule.ChannelDaySchedule(ctx, channel, from, to)
+	if err != nil {
+		h.log.Error("tv channel day schedule", "err", err)
+		return c.Send("Ошибка при запросе расписания. Попробуйте позже.")
+	}
+	if len(shows) == 0 {
+		return c.Send(fmt.Sprintf(
+			"Программа для *%s* на %s не найдена\\.",
+			escapeMarkdown(channel), escapeMarkdown(from.Format("02.01")),
+		), tele.ModeMarkdownV2)
+	}
+	if chName == "" {
+		chName = channel
+	}
+
+	dateLabel := from.Format("02.01.2006")
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "📺 *%s* — %s:\n\n", escapeMarkdown(chName), escapeMarkdown(dateLabel))
+	writeTVDaySchedule(&sb, shows, loc)
+	return c.Send(sb.String(), tele.ModeMarkdownV2)
+}
+
+// writeTVDaySchedule renders a flat (single-channel) day schedule without channel headers.
+func writeTVDaySchedule(sb *strings.Builder, shows []provider.TVShowtime, loc *time.Location) {
+	for _, show := range shows {
+		local := show.StartsAt.In(loc)
+		timeStr := local.Format("15:04")
+		if !show.EndsAt.IsZero() {
+			timeStr += "–" + show.EndsAt.In(loc).Format("15:04")
+		}
+		sb.WriteString("  `" + timeStr + "` — " + escapeMarkdown(show.Title) + "\n")
+	}
+}
+
+// parseChannelAndDate splits "Первый канал 25.06" → ("Первый канал", <June 25>).
+// The optional date token can be: DD.MM, DD.MM.YY, DD.MM.YYYY, "сегодня", "завтра", "послезавтра".
+// If no date is found, returns today.
+func parseChannelAndDate(s string, now time.Time, loc *time.Location) (channel string, day time.Time) {
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
+	s = strings.TrimSpace(s)
+	fields := strings.Fields(s)
+	if len(fields) == 0 {
+		return "", today
+	}
+	last := fields[len(fields)-1]
+	if d, ok := parseDayToken(last, today); ok {
+		channel = strings.TrimSpace(strings.Join(fields[:len(fields)-1], " "))
+		return channel, d
+	}
+	return s, today
+}
+
+// parseDayToken parses a single date token relative to today.
+func parseDayToken(token string, today time.Time) (time.Time, bool) {
+	switch strings.ToLower(token) {
+	case "сегодня":
+		return today, true
+	case "завтра":
+		return today.AddDate(0, 0, 1), true
+	case "послезавтра":
+		return today.AddDate(0, 0, 2), true
+	}
+	// DD.MM
+	if t, err := time.ParseInLocation("02.01", token, today.Location()); err == nil {
+		return time.Date(today.Year(), t.Month(), t.Day(), 0, 0, 0, 0, today.Location()), true
+	}
+	// DD.MM.YY
+	if t, err := time.ParseInLocation("02.01.06", token, today.Location()); err == nil {
+		return t, true
+	}
+	// DD.MM.YYYY
+	if t, err := time.ParseInLocation("02.01.2006", token, today.Location()); err == nil {
+		return t, true
+	}
+	return time.Time{}, false
 }
 
 func writeTVShows(sb *strings.Builder, shows []provider.TVShowtime, fallbackChannel string, loc *time.Location) {
@@ -846,7 +943,7 @@ const msgWelcome = `*Привет! Я бот напоминаний.*
 Просто напишите что-нибудь вроде:
 • «напомни 25 декабря в 10:00 поздравить маму»
 • «каждый будний день в 9:00 напоминай выпить таблетку»
-• «уведоми за 3 часа до КВН на Первом канале»
+• «уведоми за 1 неделю до КВН на Первом канале»
 
 /tv — расписание TV программ
 /help — справка
@@ -862,11 +959,14 @@ const msgHelp = `*Команды:*
 /tz <зона> — установить часовой пояс (например, Europe/Moscow)
 /tv <программа> — расписание на ближайшую неделю
 /tv <программа> | <канал> — расписание на конкретном канале
+/tv | <канал> — программа канала на сегодня
+/tv | <канал> 25\.06 — программа канала на дату
 /help — эта справка
 
 *Примеры напоминаний:*
 • «напомни завтра в 9:00 позвонить маме»
 • «каждый понедельник в 8:30 напоминай про совещание»
 • «уведоми за 3 часа до КВН на Первом»
+• «уведоми за 1 неделю до КВН на Первом»
 • «вот ссылка на товар — уведоми при снижении цены»
 • «каждый день в 9:00 — 5 дешёвых билетов СПб→Калининград на месяц вперёд»`

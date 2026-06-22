@@ -34,6 +34,61 @@ func TestSchedulerQueryScheduleWithoutChannel(t *testing.T) {
 	}
 }
 
+func TestSchedulerChannelDaySchedule(t *testing.T) {
+	t.Parallel()
+
+	loc, _ := time.LoadLocation("Europe/Moscow")
+	day := time.Date(2026, 6, 22, 0, 0, 0, 0, loc)
+	store := &memStore{
+		channels: []EPGChannel{
+			{ID: "one", DisplayName: "Первый канал"},
+			{ID: "sts", DisplayName: "СТС"},
+		},
+		progs: []EPGProgramme{
+			{ChannelID: "one", Title: "Доброе утро", StartsAt: day.Add(6 * time.Hour)},
+			{ChannelID: "one", Title: "Новости", StartsAt: day.Add(9 * time.Hour)},
+			{ChannelID: "sts", Title: "Другой канал", StartsAt: day.Add(8 * time.Hour)},
+			// Outside the day window — should not appear.
+			{ChannelID: "one", Title: "Вчера", StartsAt: day.Add(-time.Hour)},
+		},
+	}
+
+	from := day
+	to := day.Add(24 * time.Hour)
+	chName, shows, err := NewScheduler(store).ChannelDaySchedule(context.Background(), "Первый", from, to)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if chName != "Первый канал" {
+		t.Fatalf("chName = %q, want Первый канал", chName)
+	}
+	if len(shows) != 2 {
+		t.Fatalf("got %d shows, want 2: %+v", len(shows), shows)
+	}
+	if shows[0].Title != "Доброе утро" || shows[1].Title != "Новости" {
+		t.Fatalf("unexpected titles: %+v", shows)
+	}
+	for _, s := range shows {
+		if s.Channel != "Первый канал" {
+			t.Fatalf("show channel = %q, want Первый канал", s.Channel)
+		}
+	}
+}
+
+func TestSchedulerChannelDayScheduleUnknownChannel(t *testing.T) {
+	t.Parallel()
+	store := &memStore{
+		channels: []EPGChannel{{ID: "one", DisplayName: "Первый канал"}},
+	}
+	chName, shows, err := NewScheduler(store).ChannelDaySchedule(
+		context.Background(), "Несуществующий канал",
+		time.Now(), time.Now().Add(24*time.Hour),
+	)
+	if err != nil || chName != "" || shows != nil {
+		t.Fatalf("expected empty result, got chName=%q shows=%v err=%v", chName, shows, err)
+	}
+}
+
 func TestSchedulerQueryScheduleWithFuzzyChannel(t *testing.T) {
 	t.Parallel()
 

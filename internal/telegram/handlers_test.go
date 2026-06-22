@@ -79,6 +79,35 @@ func TestBuildAbsoluteReminderPreservesFireAt(t *testing.T) {
 	}
 }
 
+func TestParseChannelAndDate(t *testing.T) {
+	loc := time.FixedZone("MSK", 3*60*60)
+	today := time.Date(2026, 6, 22, 0, 0, 0, 0, loc)
+	now := today.Add(12 * time.Hour)
+
+	cases := []struct {
+		input   string
+		channel string
+		day     time.Time
+	}{
+		{"Первый канал", "Первый канал", today},
+		{"Первый канал сегодня", "Первый канал", today},
+		{"Первый канал завтра", "Первый канал", today.AddDate(0, 0, 1)},
+		{"Первый канал послезавтра", "Первый канал", today.AddDate(0, 0, 2)},
+		{"Первый канал 25.06", "Первый канал", time.Date(2026, 6, 25, 0, 0, 0, 0, loc)},
+		{"Первый канал 01.01.2027", "Первый канал", time.Date(2027, 1, 1, 0, 0, 0, 0, loc)},
+		{"СТС", "СТС", today},
+	}
+	for _, tc := range cases {
+		ch, d := parseChannelAndDate(tc.input, now, loc)
+		if ch != tc.channel {
+			t.Errorf("parseChannelAndDate(%q) channel = %q, want %q", tc.input, ch, tc.channel)
+		}
+		if !d.Equal(tc.day) {
+			t.Errorf("parseChannelAndDate(%q) day = %v, want %v", tc.input, d, tc.day)
+		}
+	}
+}
+
 func TestValidateParseResultRejectsEmptySpec(t *testing.T) {
 	if err := validateParseResult(&nlu.ParseResult{Spec: &domain.Spec{}}); err == nil {
 		t.Fatal("expected validation error")

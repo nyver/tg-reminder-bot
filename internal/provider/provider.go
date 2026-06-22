@@ -62,6 +62,9 @@ type TVShowtime struct {
 // TVScheduler looks up TV programme schedules on demand.
 type TVScheduler interface {
 	QuerySchedule(ctx context.Context, title, channel string, from, to time.Time) ([]TVShowtime, error)
+	// ChannelDaySchedule returns all programmes for the named channel in [from, to).
+	// channelName is the canonical display name resolved from the index.
+	ChannelDaySchedule(ctx context.Context, channel string, from, to time.Time) (channelName string, shows []TVShowtime, err error)
 }
 
 type Offer struct {

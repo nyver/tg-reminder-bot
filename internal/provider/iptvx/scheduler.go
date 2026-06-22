@@ -57,6 +57,33 @@ func (s *Scheduler) QuerySchedule(ctx context.Context, title, channel string, fr
 	return out, nil
 }
 
+// ChannelDaySchedule implements provider.TVScheduler.
+// Returns all programmes for the named channel in [from, to).
+func (s *Scheduler) ChannelDaySchedule(ctx context.Context, channel string, from, to time.Time) (string, []provider.TVShowtime, error) {
+	channels, err := s.store.Channels(ctx)
+	if err != nil {
+		return "", nil, err
+	}
+	ch := bestChannelMatch(channels, channel)
+	if ch.ID == "" {
+		return "", nil, nil
+	}
+	progs, err := s.store.Programmes(ctx, ch.ID, from, to)
+	if err != nil {
+		return "", nil, err
+	}
+	out := make([]provider.TVShowtime, 0, len(progs))
+	for _, p := range progs {
+		out = append(out, provider.TVShowtime{
+			Title:    p.Title,
+			Channel:  ch.DisplayName,
+			StartsAt: p.StartsAt,
+			EndsAt:   p.EndsAt,
+		})
+	}
+	return ch.DisplayName, out, nil
+}
+
 // bestChannelMatch returns the channel whose display name best fuzzy-matches query.
 func bestChannelMatch(channels []EPGChannel, query string) EPGChannel {
 	var best EPGChannel
