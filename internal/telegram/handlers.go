@@ -302,8 +302,21 @@ func (h *Handler) handleTVChannelDay(ctx context.Context, c tele.Context, channe
 			escapeMarkdown(channel), escapeMarkdown(from.Format("02.01")),
 		), tele.ModeMarkdownV2)
 	}
+
 	if chName == "" {
 		chName = channel
+	}
+
+	// For today's schedule, hide programmes that have already ended.
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
+	if from.Equal(today) {
+		shows = filterEndedShows(shows, now)
+	}
+	if len(shows) == 0 {
+		return c.Send(fmt.Sprintf(
+			"Все программы *%s* на сегодня уже завершились\\.",
+			escapeMarkdown(chName),
+		), tele.ModeMarkdownV2)
 	}
 
 	dateLabel := from.Format("02.01.2006")
@@ -311,6 +324,19 @@ func (h *Handler) handleTVChannelDay(ctx context.Context, c tele.Context, channe
 	fmt.Fprintf(&sb, "📺 *%s* — %s:\n\n", escapeMarkdown(chName), escapeMarkdown(dateLabel))
 	writeTVDaySchedule(&sb, shows, loc)
 	return c.Send(sb.String(), tele.ModeMarkdownV2)
+}
+
+// filterEndedShows removes shows whose end time is known and already passed.
+// Shows with no EndsAt are kept — we can't confirm they're over.
+func filterEndedShows(shows []provider.TVShowtime, now time.Time) []provider.TVShowtime {
+	out := shows[:0]
+	for _, s := range shows {
+		if !s.EndsAt.IsZero() && !s.EndsAt.After(now) {
+			continue
+		}
+		out = append(out, s)
+	}
+	return out
 }
 
 // writeTVDaySchedule renders a flat (single-channel) day schedule without channel headers.

@@ -108,6 +108,24 @@ func TestParseChannelAndDate(t *testing.T) {
 	}
 }
 
+func TestFilterEndedShows(t *testing.T) {
+	now := time.Date(2026, 6, 22, 15, 0, 0, 0, time.UTC)
+	shows := []provider.TVShowtime{
+		{Title: "Уже закончилась", StartsAt: now.Add(-2 * time.Hour), EndsAt: now.Add(-1 * time.Hour)},
+		{Title: "Идёт сейчас", StartsAt: now.Add(-30 * time.Minute), EndsAt: now.Add(30 * time.Minute)},
+		{Title: "Будущая", StartsAt: now.Add(time.Hour), EndsAt: now.Add(2 * time.Hour)},
+		{Title: "Без времени окончания", StartsAt: now.Add(-time.Hour)},
+	}
+
+	got := filterEndedShows(shows, now)
+	if len(got) != 3 {
+		t.Fatalf("got %d shows, want 3: %+v", len(got), got)
+	}
+	if got[0].Title != "Идёт сейчас" || got[1].Title != "Будущая" || got[2].Title != "Без времени окончания" {
+		t.Fatalf("unexpected titles: %v", got)
+	}
+}
+
 func TestHandleTVArgParsing(t *testing.T) {
 	cases := []struct {
 		payload string
