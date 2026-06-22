@@ -1,12 +1,38 @@
 package telegram
 
 import (
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/nyver2k/remindertgbot/internal/domain"
 	"github.com/nyver2k/remindertgbot/internal/nlu"
+	"github.com/nyver2k/remindertgbot/internal/provider"
 )
+
+func TestWriteTVShowsGroupsByChannelAndDay(t *testing.T) {
+	loc := time.FixedZone("MSK", 3*60*60)
+	shows := []provider.TVShowtime{
+		{Title: "Следствие вели: Лабиринт (2017)", Channel: "TEAM Crime24 HD", StartsAt: time.Date(2026, 6, 22, 17, 30, 0, 0, time.UTC), EndsAt: time.Date(2026, 6, 22, 18, 11, 0, 0, time.UTC)},
+		{Title: "Другая серия", Channel: "TEAM Crime24 HD", StartsAt: time.Date(2026, 6, 23, 17, 30, 0, 0, time.UTC)},
+		{Title: "Фильм!", Channel: "Первый канал", StartsAt: time.Date(2026, 6, 22, 19, 0, 0, 0, time.UTC)},
+	}
+
+	var sb strings.Builder
+	writeTVShows(&sb, shows, "", loc)
+
+	want := "*TEAM Crime24 HD*\n" +
+		"_пн, 22 июн_\n" +
+		"  `20:30–21:11` — Следствие вели: Лабиринт \\(2017\\)\n" +
+		"_вт, 23 июн_\n" +
+		"  `20:30` — Другая серия\n\n" +
+		"*Первый канал*\n" +
+		"_пн, 22 июн_\n" +
+		"  `22:00` — Фильм\\!\n"
+	if got := sb.String(); got != want {
+		t.Fatalf("writeTVShows() =\n%q\nwant:\n%q", got, want)
+	}
+}
 
 func TestBuildConditionalReminderSchedulesImmediateEvaluation(t *testing.T) {
 	now := time.Date(2026, 6, 21, 17, 30, 0, 0, time.UTC)

@@ -261,38 +261,64 @@ func (h *Handler) handleTV(c tele.Context) error {
 	}
 
 	var sb strings.Builder
-	if channel != "" {
-		sb.WriteString(fmt.Sprintf("📺 *%s* на *%s*:\n\n", escapeMarkdown(title), escapeMarkdown(channel)))
-	} else {
-		sb.WriteString(fmt.Sprintf("📺 *%s*:\n\n", escapeMarkdown(title)))
-	}
-
-	var curDay string
-	for _, show := range shows {
-		local := show.StartsAt.In(loc)
-		day := fmt.Sprintf("%s, %d %s", ruWeekdays[local.Weekday()], local.Day(), ruMonths[local.Month()])
-		if day != curDay {
-			curDay = day
-			sb.WriteString(fmt.Sprintf("*%s*\n", day))
-		}
-
-		timeStr := local.Format("15:04")
-		line := fmt.Sprintf("  `%s`", timeStr)
-		if !show.EndsAt.IsZero() {
-			line = fmt.Sprintf("  `%s–%s`", timeStr, show.EndsAt.In(loc).Format("15:04"))
-		}
-		line += " — " + escapeMarkdown(show.Title)
-		if channel == "" && show.Channel != "" {
-			line += " [" + escapeMarkdown(show.Channel) + "]"
-		}
-		sb.WriteString(line + "\n")
-	}
+	sb.WriteString(fmt.Sprintf("📺 *%s*:\n\n", escapeMarkdown(title)))
+	writeTVShows(&sb, shows, channel, loc)
 
 	if truncated {
-		sb.WriteString(fmt.Sprintf("\n_...показаны первые %d результатов_", maxShows))
+		sb.WriteString(fmt.Sprintf("\n_…показаны первые %d результатов_", maxShows))
 	}
 
-	return c.Send(sb.String(), tele.ModeMarkdown)
+	return c.Send(sb.String(), tele.ModeMarkdownV2)
+}
+
+func writeTVShows(sb *strings.Builder, shows []provider.TVShowtime, fallbackChannel string, loc *time.Location) {
+	type channelGroup struct {
+		name  string
+		shows []provider.TVShowtime
+	}
+
+	groups := make([]channelGroup, 0)
+	groupIndex := make(map[string]int)
+	for _, show := range shows {
+		name := show.Channel
+		if name == "" {
+			name = fallbackChannel
+		}
+		if name == "" {
+			name = "Канал не указан"
+		}
+
+		i, ok := groupIndex[name]
+		if !ok {
+			i = len(groups)
+			groupIndex[name] = i
+			groups = append(groups, channelGroup{name: name})
+		}
+		groups[i].shows = append(groups[i].shows, show)
+	}
+
+	for groupNo, group := range groups {
+		if groupNo > 0 {
+			sb.WriteByte('\n')
+		}
+		sb.WriteString("*" + escapeMarkdown(group.name) + "*\n")
+
+		var curDay string
+		for _, show := range group.shows {
+			local := show.StartsAt.In(loc)
+			day := fmt.Sprintf("%s, %d %s", ruWeekdays[local.Weekday()], local.Day(), ruMonths[local.Month()])
+			if day != curDay {
+				curDay = day
+				sb.WriteString("_" + escapeMarkdown(day) + "_\n")
+			}
+
+			timeStr := local.Format("15:04")
+			if !show.EndsAt.IsZero() {
+				timeStr += "–" + show.EndsAt.In(loc).Format("15:04")
+			}
+			sb.WriteString("  `" + timeStr + "` — " + escapeMarkdown(show.Title) + "\n")
+		}
+	}
 }
 
 func (h *Handler) handleText(c tele.Context) error {
