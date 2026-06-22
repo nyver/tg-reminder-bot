@@ -108,6 +108,40 @@ func TestParseChannelAndDate(t *testing.T) {
 	}
 }
 
+func TestFormatFireLine(t *testing.T) {
+	fireAt := "2026-06-23T10:00:00+03:00"
+	result := &nlu.ParseResult{FireAt: &fireAt}
+	got := formatFireLine(result)
+	if got != "⏰ 23 июн в 10:00\n" {
+		t.Fatalf("formatFireLine = %q", got)
+	}
+}
+
+func TestFormatFireLineNil(t *testing.T) {
+	if got := formatFireLine(nil); got != "" {
+		t.Fatalf("expected empty, got %q", got)
+	}
+	if got := formatFireLine(&nlu.ParseResult{}); got != "" {
+		t.Fatalf("expected empty for no FireAt, got %q", got)
+	}
+}
+
+func TestFormatCronLineRu(t *testing.T) {
+	cases := []struct{ expr, want string }{
+		{"0 10 * * *", "каждый день в 10:00"},
+		{"30 8 * * 1", "каждый пн в 08:30"},
+		{"0 9 * * 1-5", "пн–пт в 09:00"},
+		{"0 9 * * 6", "каждую сб в 09:00"},
+		{"0 9 1 * *", ""},  // specific dom — unsupported
+		{"*/5 * * * *", ""}, // non-literal hour/min — unsupported
+	}
+	for _, tc := range cases {
+		if got := formatCronLineRu(tc.expr); got != tc.want {
+			t.Errorf("formatCronLineRu(%q) = %q, want %q", tc.expr, got, tc.want)
+		}
+	}
+}
+
 func TestFilterEndedShows(t *testing.T) {
 	now := time.Date(2026, 6, 22, 15, 0, 0, 0, time.UTC)
 	shows := []provider.TVShowtime{

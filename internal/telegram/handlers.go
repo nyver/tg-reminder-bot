@@ -527,7 +527,7 @@ func (h *Handler) askConfirmation(ctx context.Context, c tele.Context, userID in
 		Context: ctxJSON,
 	})
 
-	confirmMsg := fmt.Sprintf("*Создать напоминание?*\n\n%s", h.formatConfirmSpec(ctx, result.Spec))
+	confirmMsg := fmt.Sprintf("*Создать напоминание?*\n\n%s", h.formatConfirmSpec(ctx, result))
 	menu := &tele.ReplyMarkup{}
 	menu.Inline(
 		menu.Row(
@@ -540,8 +540,9 @@ func (h *Handler) askConfirmation(ctx context.Context, c tele.Context, userID in
 
 // formatConfirmSpec builds the human-readable spec block for the confirmation
 // dialog. For price-drop reminders it probes the current price (best-effort).
-func (h *Handler) formatConfirmSpec(ctx context.Context, spec *domain.Spec) string {
-	base := formatSpec(spec)
+func (h *Handler) formatConfirmSpec(ctx context.Context, result *nlu.ParseResult) string {
+	spec := result.Spec
+	base := formatSpec(spec) + formatFireLine(result)
 	if spec == nil || spec.Trigger != domain.TriggerThreshold || spec.Event.Type != "price" {
 		return base
 	}
@@ -580,6 +581,73 @@ func (h *Handler) formatConfirmSpec(ctx context.Context, spec *domain.Spec) stri
 		sb.WriteString(fmt.Sprintf("🔗 %s\n", escapeMarkdown(u)))
 	}
 	return sb.String()
+}
+
+// formatFireLine returns a human-readable fire time line for the confirmation dialog.
+// Returns "" for conditional/anchor reminders — they have no user-visible absolute time.
+func formatFireLine(result *nlu.ParseResult) string {
+	if result == nil {
+		return ""
+	}
+	if result.FireAt != nil {
+		t, err := time.Parse(time.RFC3339, *result.FireAt)
+		if err == nil {
+			date := fmt.Sprintf("%d %s", t.Day(), ruMonths[t.Month()])
+			if t.Year() != time.Now().Year() {
+				date += fmt.Sprintf(" %d", t.Year())
+			}
+			return fmt.Sprintf("⏰ %s в %s\n", date, t.Format("15:04"))
+		}
+	}
+	if result.EvalCron != "" {
+		if line := formatCronLineRu(result.EvalCron); line != "" {
+			return "🔁 " + line + "\n"
+		}
+	}
+	return ""
+}
+
+// formatCronLineRu formats simple 5-field cron expressions into Russian.
+// Returns "" for patterns it cannot handle.
+func formatCronLineRu(expr string) string {
+	fields := strings.Fields(expr)
+	if len(fields) != 5 {
+		return ""
+	}
+	m, h, dom, mon, dow := fields[0], fields[1], fields[2], fields[3], fields[4]
+	if dom != "*" || mon != "*" {
+		return ""
+	}
+	mi, errM := strconv.Atoi(m)
+	hi, errH := strconv.Atoi(h)
+	if errM != nil || errH != nil {
+		return ""
+	}
+	timeStr := fmt.Sprintf("%02d:%02d", hi, mi)
+	var dayStr string
+	switch dow {
+	case "*":
+		dayStr = "каждый день"
+	case "1-5":
+		dayStr = "пн–пт"
+	case "1":
+		dayStr = "каждый пн"
+	case "2":
+		dayStr = "каждый вт"
+	case "3":
+		dayStr = "каждую ср"
+	case "4":
+		dayStr = "каждый чт"
+	case "5":
+		dayStr = "каждую пт"
+	case "6":
+		dayStr = "каждую сб"
+	case "0", "7":
+		dayStr = "каждое вс"
+	default:
+		return ""
+	}
+	return dayStr + " в " + timeStr
 }
 
 func formatPriceRub(kopecks int64, currency string) string {
@@ -893,7 +961,10 @@ func formatSpec(spec *domain.Spec) string {
 			sb.WriteString(fmt.Sprintf("📅 Горизонт: %d дн\\.\n", spec.HorizonDays))
 		}
 	default:
-		if spec.Message != "" && spec.Event.Title != spec.Message {
+		// Only write message as body if the event title was already shown as header
+		// and the message adds something new. When Event.Title is empty, spec.Message
+		// was already rendered as the header above — don't repeat it.
+		if spec.Message != "" && spec.Event.Title != "" && spec.Event.Title != spec.Message {
 			sb.WriteString(escapeMarkdown(spec.Message) + "\n")
 		}
 	}
