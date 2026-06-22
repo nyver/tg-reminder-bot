@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -33,12 +34,14 @@ func (r *NotificationRepo) Enqueue(ctx context.Context, n *domain.ScheduledNotif
 }
 
 // LeasePending locks up to limit pending notifications that are ready to fire.
+// SELECT and UPDATE run in the same transaction so no other worker can steal rows
+// between the two statements.
 func (r *NotificationRepo) LeasePending(ctx context.Context, workerID string, limit int) ([]domain.ScheduledNotification, error) {
 	skipLocked := r.db.ForUpdateSkipLocked()
 	minutesAgo := r.db.MinutesAgo(2)
 	now := r.db.Now()
 
-	q := r.db.Rebind(`
+	selectQ := r.db.Rebind(`
 		SELECT id, reminder_id, fire_at, text, idempotency_key, status, attempts, created_at, sent_at
 		FROM scheduled_notifications
 		WHERE status = 'pending' AND fire_at <= ` + now + `
@@ -46,37 +49,41 @@ func (r *NotificationRepo) LeasePending(ctx context.Context, workerID string, li
 		ORDER BY fire_at
 		LIMIT $1 ` + skipLocked)
 
-	rows, err := r.db.QueryContext(ctx, q, limit)
+	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer tx.Rollback() //nolint:errcheck
 
-	var result []domain.ScheduledNotification
-	for rows.Next() {
-		var n domain.ScheduledNotification
-		var idStr, remIDStr string
-		var sentAt sql.NullTime
-		if err := rows.Scan(
-			&idStr, &remIDStr, &n.FireAt, &n.Text,
-			&n.IdempotencyKey, &n.Status, &n.Attempts, &n.CreatedAt, &sentAt,
-		); err != nil {
-			return nil, err
-		}
-		n.ID = mustParseUUID(idStr)
-		n.ReminderID = mustParseUUID(remIDStr)
-		n.SentAt = PtrTime(sentAt)
-		result = append(result, n)
+	rows, err := tx.QueryContext(ctx, selectQ, limit)
+	if err != nil {
+		return nil, err
 	}
-	if err := rows.Err(); err != nil {
+	result, err := scanNotifications(rows)
+	rows.Close() // must close before UPDATE within the same tx
+	if err != nil {
 		return nil, err
 	}
 
-	ids := make([]string, len(result))
-	for i, n := range result {
-		ids[i] = n.ID.String()
+	if len(result) > 0 {
+		ids := make([]string, len(result))
+		for i, n := range result {
+			ids[i] = n.ID.String()
+		}
+		in := r.db.InClause(2, len(ids))
+		args := make([]any, 0, 1+len(ids))
+		args = append(args, workerID)
+		for _, id := range ids {
+			args = append(args, id)
+		}
+		updateQ := r.db.Rebind(fmt.Sprintf(
+			`UPDATE scheduled_notifications SET locked_at=%s, locked_by=$1 WHERE id %s`, now, in))
+		if _, err := tx.ExecContext(ctx, updateQ, args...); err != nil {
+			return nil, err
+		}
 	}
-	return result, r.db.ExecUpdateLocked(ctx, "scheduled_notifications", workerID, ids)
+
+	return result, tx.Commit()
 }
 
 func (r *NotificationRepo) MarkSent(ctx context.Context, id uuid.UUID) error {

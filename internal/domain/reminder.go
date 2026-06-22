@@ -33,17 +33,19 @@ const (
 )
 
 type Reminder struct {
-	ID              uuid.UUID
-	UserID          int64
-	Kind            Kind
-	RawText         string
-	Spec            Spec
-	Status          Status
-	NextEvalAt      *time.Time
-	EvalCron        string
-	IdempotencyKey  string
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
+	ID             uuid.UUID
+	UserID         int64
+	Kind           Kind
+	RawText        string
+	Spec           Spec
+	Status         Status
+	NextEvalAt     *time.Time
+	EvalCron       string
+	IdempotencyKey string
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+	// UserTZ is populated by the scheduler at load time (not persisted).
+	UserTZ string
 }
 
 // Spec — нормализованное намерение (хранится как jsonb).

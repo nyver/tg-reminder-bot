@@ -28,6 +28,8 @@ SQLite используется по умолчанию. Отдельный се
 | `/resume <id>` | возобновить приостановленное напоминание |
 | `/tz` | показать текущий часовой пояс |
 | `/tz <зона>` | установить часовой пояс в формате IANA, например `Europe/Moscow` |
+| `/tv <программа>` | найти программу на всех каналах на ближайшую неделю |
+| `/tv <программа> \| <канал>` | найти программу на указанном канале на ближайшую неделю |
 
 ID для команд `/cancel`, `/remove`, `/pause` и `/resume` можно получить командой
 `/list`. Команда `/cancel` сохраняет напоминание в базе со статусом `done`, а
@@ -46,6 +48,16 @@ ID для команд `/cancel`, `/remove`, `/pause` и `/resume` можно п
 уведоми при снижении цены: https://example.com/product
 каждый день в 9:00 покажи 5 дешёвых билетов из Москвы в Казань на месяц вперёд
 ```
+
+Расписание можно запросить независимо от напоминаний:
+
+```text
+/tv КВН
+/tv КВН | Первый канал
+```
+
+Первый вариант ищет выпуски на всех каналах, второй ограничивает результат наиболее
+подходящим по названию каналом. Время показывается в часовом поясе пользователя из `/tz`.
 
 ## Быстрый запуск в Docker
 
@@ -137,38 +149,65 @@ volumes:
 | `LLM_API_KEY` | ключ OpenRouter или Anthropic |
 | `EPG_SERVICE_API_KEY` | Bearer-токен EPG Service |
 | `EPG_SERVICE_BASE_URL` | переопределение корневого URL EPG Service API |
+| `IPTVX_EPG_URL` | URL XMLTV/XMLTV.GZ для основного TV-провайдера |
+| `IPTVX_EPG_FILE` | путь к локальному кешу IPTVX EPG |
 | `DATABASE_DRIVER` | `sqlite` или `postgres` |
 | `DATABASE_DSN` | путь SQLite или PostgreSQL DSN |
 | `DATABASE_URL` | PostgreSQL URL с наивысшим приоритетом |
 | `LOG_LEVEL` | `debug`, `info`, `warn` или `error` |
 
-## TV API
+## TV-расписание
 
-Получите Bearer-токен EPG Service и задайте `EPG_SERVICE_API_KEY`. Настройки
-провайдера находятся в YAML:
+По умолчанию worker скачивает XMLTV-расписание IPTVX, сохраняет исходный файл в локальный
+кеш и импортирует каналы и программы в общую базу данных. Эта база используется как для
+TV-напоминаний, так и командой `/tv` в процессе bot. Поэтому bot и worker должны работать
+с одной SQLite-базой или с одним экземпляром PostgreSQL.
+
+Настройки основного провайдера:
 
 ```yaml
 providers:
+  iptvx:
+    url: https://iptvx.one/epg/epg.xml.gz
+    file_path: ./data/iptvx_epg.xml.gz
+    update_interval: 168h
+    timeout: 120s
+```
+
+При запуске в Docker используйте путь `/data/iptvx_epg.xml.gz`: каталог `/data` подключён
+к persistent volume. Первый импорт может занять некоторое время; до его завершения `/tv`
+вернёт пустой результат.
+
+Поля секции `providers.iptvx`:
+
+| Поле | Описание | Значение по умолчанию |
+| --- | --- | --- |
+| `url` | адрес XMLTV или XMLTV.GZ; пустое значение включает резервный EPG Service | `https://iptvx.one/epg/epg.xml.gz` |
+| `file_path` | путь к кешу скачанного расписания | `./data/iptvx_epg.xml.gz` |
+| `update_interval` | период проверки и обновления EPG | `168h` |
+| `timeout` | таймаут скачивания EPG-файла | `120s` |
+
+`IPTVX_EPG_URL` и `IPTVX_EPG_FILE` переопределяют соответствующие значения YAML.
+В текущем `docker-compose.yml` эти переменные не пробрасываются автоматически, поэтому
+для Compose удобнее задавать параметры IPTVX непосредственно в `config.yaml`.
+
+Если `providers.iptvx.url` пуст, worker переключается на EPG Service. Этот режим требует
+Bearer-токен и поддерживает TV-напоминания, но не импортирует расписание в локальную базу,
+поэтому команда `/tv` не получает из него данные:
+
+```yaml
+providers:
+  iptvx:
+    url: ""
   tv:
     base_url: https://api.epgservice.ru
     api_key: "${EPG_SERVICE_API_KEY}"
     timeout: 15s
 ```
 
-Поля секции `providers.tv`:
-
-| Поле | Описание | Значение по умолчанию |
-| --- | --- | --- |
-| `base_url` | корневой URL EPG Service API без завершающего `/` | `https://api.epgservice.ru` |
-| `api_key` | Bearer-токен для запросов к API | пустое значение |
-| `timeout` | максимальная длительность одного HTTP-запроса | `15s` |
-
-При пустом `api_key` TV-провайдер отключён: worker продолжает работу, но не
-создаёт уведомления по телепрограмме. `EPG_SERVICE_API_KEY` переопределяет ключ
-из YAML, а `EPG_SERVICE_BASE_URL` — `providers.tv.base_url`.
-
-Провайдер кэширует индекс каналов на один час. Расписание запрашивается отдельно
-для каждой недели, попавшей во временное окно напоминания.
+`EPG_SERVICE_API_KEY` переопределяет ключ из YAML, а `EPG_SERVICE_BASE_URL` —
+`providers.tv.base_url`. EPG Service кеширует индекс каналов на один час и запрашивает
+расписание отдельно для каждой недели во временном окне напоминания.
 
 Для TV-напоминания NLU формирует параметры `channel` и название передачи:
 
@@ -182,7 +221,8 @@ providers:
 
 Если ID канала уже известен, вместо поиска по названию можно передать
 `params.channel_id`. Поле `params.channel` используется для поиска канала по
-названию через `/v1/index`; необходимо указать хотя бы одно из этих полей.
+названию. Для TV-напоминания необходимо указать хотя бы одно из этих полей;
+команда `/tv` также умеет искать программу сразу по всем каналам.
 
 ## LLM-провайдер
 
@@ -195,7 +235,15 @@ nlu:
   openrouter:
     base_url: https://openrouter.ai/api/v1
     model: anthropic/claude-haiku-4.5
+    fallback_models:
+      - mistralai/mistral-7b-instruct:free
+      - meta-llama/llama-3.2-3b-instruct:free
+    timeout: 60s
+    max_tokens: 1024
 ```
+
+При ответе HTTP 429 от основной модели OpenRouter последовательно пробуются модели из
+`fallback_models`. `timeout` ограничивает всё обращение к LLM, а `max_tokens` — размер ответа.
 
 Для прямого подключения к Anthropic:
 

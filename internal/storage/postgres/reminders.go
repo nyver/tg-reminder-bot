@@ -84,13 +84,15 @@ func (r *ReminderRepo) ListByUser(ctx context.Context, userID int64) ([]domain.R
 	return scanReminders(rows)
 }
 
-// LeaseDue returns reminders due for evaluation and marks them locked.
+// LeaseDue returns reminders due for evaluation and marks them locked atomically.
+// SELECT and UPDATE run in the same transaction so no other worker can steal rows
+// between the two statements.
 func (r *ReminderRepo) LeaseDue(ctx context.Context, workerID string, limit int) ([]domain.Reminder, error) {
 	skipLocked := r.db.ForUpdateSkipLocked()
 	minutesAgo := r.db.MinutesAgo(5)
 	now := r.db.Now()
 
-	q := r.db.Rebind(`
+	selectQ := r.db.Rebind(`
 		SELECT id, user_id, kind, raw_text, spec, status, eval_cron, next_eval_at, created_at, updated_at
 		FROM reminders
 		WHERE status = 'active' AND next_eval_at <= ` + now + `
@@ -98,21 +100,80 @@ func (r *ReminderRepo) LeaseDue(ctx context.Context, workerID string, limit int)
 		ORDER BY next_eval_at
 		LIMIT $1 ` + skipLocked)
 
-	rows, err := r.db.QueryContext(ctx, q, limit)
+	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer tx.Rollback() //nolint:errcheck
+
+	rows, err := tx.QueryContext(ctx, selectQ, limit)
+	if err != nil {
+		return nil, err
+	}
 	rems, err := scanReminders(rows)
+	rows.Close() // must close before UPDATE within the same tx
 	if err != nil {
 		return nil, err
 	}
 
-	ids := make([]string, len(rems))
-	for i, rem := range rems {
-		ids[i] = rem.ID.String()
+	if len(rems) > 0 {
+		ids := make([]string, len(rems))
+		for i, rem := range rems {
+			ids[i] = rem.ID.String()
+		}
+		in := r.db.InClause(2, len(ids))
+		args := make([]any, 0, 1+len(ids))
+		args = append(args, workerID)
+		for _, id := range ids {
+			args = append(args, id)
+		}
+		updateQ := r.db.Rebind(fmt.Sprintf(
+			`UPDATE reminders SET locked_at=%s, locked_by=$1 WHERE id %s`, now, in))
+		if _, err := tx.ExecContext(ctx, updateQ, args...); err != nil {
+			return nil, err
+		}
+
+		// Bulk-fetch user TZs so the evaluator can use the correct timezone.
+		if tzMap, err := fetchUserTZs(ctx, tx, r.db, rems); err == nil {
+			for i := range rems {
+				if tz, ok := tzMap[rems[i].UserID]; ok {
+					rems[i].UserTZ = tz
+				}
+			}
+		}
 	}
-	return rems, r.db.ExecUpdateLocked(ctx, "reminders", workerID, ids)
+
+	return rems, tx.Commit()
+}
+
+// fetchUserTZs returns a userID→tz map for all unique users in the batch.
+func fetchUserTZs(ctx context.Context, tx interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}, db *DB, rems []domain.Reminder) (map[int64]string, error) {
+	seen := make(map[int64]struct{}, len(rems))
+	uids := make([]any, 0, len(rems))
+	for _, rem := range rems {
+		if _, ok := seen[rem.UserID]; !ok {
+			seen[rem.UserID] = struct{}{}
+			uids = append(uids, rem.UserID)
+		}
+	}
+	in := db.InClause(1, len(uids))
+	q := db.Rebind(fmt.Sprintf("SELECT id, tz FROM users WHERE id %s", in))
+	rows, err := tx.QueryContext(ctx, q, uids...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	tzMap := make(map[int64]string, len(uids))
+	for rows.Next() {
+		var uid int64
+		var tz string
+		if rows.Scan(&uid, &tz) == nil {
+			tzMap[uid] = tz
+		}
+	}
+	return tzMap, rows.Err()
 }
 
 func (r *ReminderRepo) UpdateNextEval(ctx context.Context, id uuid.UUID, next *time.Time) error {

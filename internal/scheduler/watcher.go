@@ -83,18 +83,27 @@ func (w *Watcher) startup(ctx context.Context) {
 }
 
 func (w *Watcher) tick_(ctx context.Context) error {
-	batch, err := w.reminders.LeaseDue(ctx, w.workerID, watcherBatchSize)
-	if err != nil {
-		return err
+	total := 0
+	for {
+		batch, err := w.reminders.LeaseDue(ctx, w.workerID, watcherBatchSize)
+		if err != nil {
+			return err
+		}
+		if len(batch) == 0 {
+			break
+		}
+		total += len(batch)
+		for _, rem := range batch {
+			w.processReminder(ctx, rem)
+		}
+		if len(batch) < watcherBatchSize {
+			break // no more rows
+		}
 	}
-	if len(batch) == 0 {
-		return nil
+	if total > 0 {
+		w.log.Info("watcher tick: processing", "count", total)
+		updateActiveMetrics(ctx, w.reminders)
 	}
-	w.log.Info("watcher tick: processing", "count", len(batch))
-	for _, rem := range batch {
-		w.processReminder(ctx, rem)
-	}
-	updateActiveMetrics(ctx, w.reminders)
 	return nil
 }
 

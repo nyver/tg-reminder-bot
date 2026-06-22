@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -69,7 +70,7 @@ func main() {
 			Timeout: cfg.Providers.TV.Timeout,
 		}, log))
 	}
-	registry.RegisterMetric(price.New(cfg.Providers.Price.UserAgent, cfg.Providers.Travel.Timeout, log))
+	registry.RegisterMetric(price.New(cfg.Providers.Price.UserAgent, cfg.Providers.Price.Timeout, log))
 
 	airP := travel.NewAirProvider(cfg.Providers.Travel.AirAPIKey, log)
 	railP := travel.NewRailProvider(cfg.Providers.Travel.RailAPIKey, log)
@@ -110,7 +111,7 @@ func main() {
 	g.Go(func() error { return janitor.Run(ctx) })
 
 	log.Info("worker running", "worker_id", workerID)
-	if err := g.Wait(); err != nil && err != context.Canceled {
+	if err := g.Wait(); err != nil && !errors.Is(err, context.Canceled) {
 		log.Error("worker exited", "err", err)
 		os.Exit(1)
 	}

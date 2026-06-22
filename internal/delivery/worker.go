@@ -2,6 +2,7 @@ package delivery
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"math"
 	"time"
@@ -88,7 +89,11 @@ func (w *Worker) deliver(ctx context.Context, n domain.ScheduledNotification) {
 	rem, err := w.reminders.Get(ctx, n.ReminderID)
 	if err != nil {
 		w.log.Error("reminder lookup failed", "id", n.ReminderID, "err", err)
-		_ = w.notifications.MarkFailed(ctx, n.ID, n.Attempts+1)
+		attempts := n.Attempts + 1
+		if errors.Is(err, domain.ErrNotFound) {
+			attempts = maxAttempts // reminder deleted — no point retrying
+		}
+		_ = w.notifications.MarkFailed(ctx, n.ID, attempts)
 		return
 	}
 

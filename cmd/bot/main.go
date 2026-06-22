@@ -11,6 +11,8 @@ import (
 	"github.com/nyver2k/remindertgbot/internal/config"
 	"github.com/nyver2k/remindertgbot/internal/nlu"
 	"github.com/nyver2k/remindertgbot/internal/observability"
+	"github.com/nyver2k/remindertgbot/internal/provider/iptvx"
+	"github.com/nyver2k/remindertgbot/internal/provider/price"
 	"github.com/nyver2k/remindertgbot/internal/storage/postgres"
 	"github.com/nyver2k/remindertgbot/internal/telegram"
 )
@@ -48,18 +50,23 @@ func main() {
 	if cfg.NLU.Provider == "claude" {
 		model = cfg.NLU.Claude.Model
 	}
-	llmParser, err := nlu.NewConfiguredLLMParser(cfg.NLU.Provider, cfg.NLU.APIKey, model, baseURL, loc)
+	llmParser, err := nlu.NewConfiguredLLMParser(cfg.NLU.Provider, cfg.NLU.APIKey, model, baseURL, cfg.NLU.OpenRouter.FallbackModels, cfg.NLU.OpenRouter.Timeout, cfg.NLU.OpenRouter.MaxTokens, loc)
 	if err != nil {
 		log.Error("nlu init", "err", err)
 		os.Exit(1)
 	}
 	parser := nlu.NewChain(0.85, fastPath, llmParser)
 
+	priceProber := price.New(cfg.Providers.Price.UserAgent, cfg.Providers.Price.Timeout, log)
+	tvScheduler := iptvx.NewScheduler(postgres.NewEPGRepo(db))
+
 	handler := telegram.NewHandler(
 		telegram.NewReminderService(reminderRepo),
 		telegram.NewUserService(userRepo),
 		dialogRepo,
 		parser,
+		priceProber,
+		tvScheduler,
 		log,
 	)
 

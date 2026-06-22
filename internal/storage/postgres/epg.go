@@ -62,6 +62,17 @@ func (r *EPGRepo) Channels(ctx context.Context) ([]iptvx.EPGChannel, error) {
 	return out, rows.Err()
 }
 
+// HasFutureSchedule returns true when the DB contains at least one programme
+// starting after now, which means the imported data is still usable.
+func (r *EPGRepo) HasFutureSchedule(ctx context.Context) (bool, error) {
+	var exists bool
+	err := r.db.QueryRowContext(ctx,
+		r.db.Rebind(`SELECT EXISTS(SELECT 1 FROM epg_programmes WHERE starts_at > $1)`),
+		time.Now().UTC(),
+	).Scan(&exists)
+	return exists, err
+}
+
 // Programmes returns programmes for channelID where starts_at ∈ [from, to).
 func (r *EPGRepo) Programmes(ctx context.Context, channelID string, from, to time.Time) ([]iptvx.EPGProgramme, error) {
 	q := r.db.Rebind(`
@@ -91,6 +102,46 @@ func (r *EPGRepo) Programmes(ctx context.Context, channelID string, from, to tim
 		}
 		p.Desc = desc.String
 		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// SearchProgrammes finds programmes whose title contains titleLike, optionally
+// filtered to channelID (empty = all channels). Results include the channel
+// display name and are ordered by starts_at.
+func (r *EPGRepo) SearchProgrammes(ctx context.Context, titleLike, channelID string, from, to time.Time) ([]iptvx.EPGSearchResult, error) {
+	var sb strings.Builder
+	args := []any{"%" + titleLike + "%", from.UTC(), to.UTC()}
+	sb.WriteString(`
+		SELECT p.title, p.starts_at, p.ends_at, c.id, c.display_name
+		FROM   epg_programmes p
+		JOIN   epg_channels c ON c.id = p.channel_id
+		WHERE  lower(p.title) LIKE lower($1)
+		  AND  p.starts_at >= $2
+		  AND  p.starts_at <  $3`)
+	if channelID != "" {
+		sb.WriteString(` AND p.channel_id = $4`)
+		args = append(args, channelID)
+	}
+	sb.WriteString(` ORDER BY p.starts_at LIMIT 100`)
+
+	rows, err := r.db.QueryContext(ctx, r.db.Rebind(sb.String()), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []iptvx.EPGSearchResult
+	for rows.Next() {
+		var res iptvx.EPGSearchResult
+		var endsAt sql.NullTime
+		if err := rows.Scan(&res.Title, &res.StartsAt, &endsAt, &res.ChannelID, &res.ChannelName); err != nil {
+			return nil, err
+		}
+		if endsAt.Valid {
+			res.EndsAt = endsAt.Time
+		}
+		out = append(out, res)
 	}
 	return out, rows.Err()
 }

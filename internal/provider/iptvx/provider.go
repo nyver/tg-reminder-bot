@@ -33,6 +33,13 @@ type EPGStore interface {
 	Channels(ctx context.Context) ([]EPGChannel, error)
 	// Programmes returns programmes for channelID in [from, to).
 	Programmes(ctx context.Context, channelID string, from, to time.Time) ([]EPGProgramme, error)
+	// SearchProgrammes finds programmes whose title contains titleLike, optionally
+	// filtered to channelID (empty string = all channels). Results include the
+	// channel display name and are ordered by starts_at.
+	SearchProgrammes(ctx context.Context, titleLike, channelID string, from, to time.Time) ([]EPGSearchResult, error)
+	// HasFutureSchedule returns true when the DB contains at least one programme
+	// starting after now, indicating the imported data is still fresh.
+	HasFutureSchedule(ctx context.Context) (bool, error)
 }
 
 type EPGChannel struct {
@@ -46,6 +53,16 @@ type EPGProgramme struct {
 	StartsAt  time.Time
 	EndsAt    time.Time // zero if unknown
 	Desc      string
+}
+
+// EPGSearchResult is returned by EPGStore.SearchProgrammes and includes the
+// channel display name alongside programme fields.
+type EPGSearchResult struct {
+	ChannelID   string
+	ChannelName string
+	Title       string
+	StartsAt    time.Time
+	EndsAt      time.Time
 }
 
 type Config struct {
@@ -161,8 +178,28 @@ func (p *Provider) Lookup(ctx context.Context, q provider.Query, from, to time.T
 	return result, nil
 }
 
-// ensureImported downloads the file if stale/absent, then parses and imports.
+// ensureImported ensures the in-memory channel cache and the DB are populated
+// with a fresh EPG schedule.
+//
+// Priority:
+//  1. DB has channels AND at least one programme in the future → warm cache, done.
+//  2. Otherwise: download the file if absent/stale, then parse+import into DB.
 func (p *Provider) ensureImported(ctx context.Context) error {
+	// Check the DB first, regardless of whether the local file exists.
+	// This handles container restarts where the file is gone but the DB is intact.
+	channels, dbErr := p.store.Channels(ctx)
+	if dbErr == nil && len(channels) > 0 {
+		hasFuture, _ := p.store.HasFutureSchedule(ctx)
+		if hasFuture {
+			p.chMu.Lock()
+			p.channels = channels
+			p.chMu.Unlock()
+			p.log.Info("iptvx: EPG already in DB, skipping import", "channels", len(channels))
+			return nil
+		}
+	}
+
+	// DB is empty or all programmes are in the past: (re)download if the file is stale.
 	info, err := os.Stat(p.cfg.FilePath)
 	fileStale := err != nil || time.Since(info.ModTime()) >= p.cfg.UpdateInterval
 

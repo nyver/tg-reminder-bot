@@ -51,6 +51,19 @@ type Measurement struct {
 	Meta      map[string]string
 }
 
+// TVShowtime is a single broadcast slot returned by TVScheduler.
+type TVShowtime struct {
+	Title    string
+	Channel  string
+	StartsAt time.Time
+	EndsAt   time.Time // zero if unknown
+}
+
+// TVScheduler looks up TV programme schedules on demand.
+type TVScheduler interface {
+	QuerySchedule(ctx context.Context, title, channel string, from, to time.Time) ([]TVShowtime, error)
+}
+
 type Offer struct {
 	Signature string // dedup key: mode|carrier|number|depart_date
 	Mode      string // air | rail

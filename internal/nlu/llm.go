@@ -48,16 +48,19 @@ func NewLLMParser(apiKey string, loc *time.Location) *LLMParser {
 }
 
 // NewConfiguredLLMParser creates an Anthropic or OpenRouter-backed parser.
-func NewConfiguredLLMParser(provider, apiKey, model, baseURL string, loc *time.Location) (*LLMParser, error) {
+func NewConfiguredLLMParser(provider, apiKey, model, baseURL string, fallbackModels []string, timeout time.Duration, maxTokens int, loc *time.Location) (*LLMParser, error) {
 	if loc == nil {
 		loc = time.UTC
+	}
+	if maxTokens <= 0 {
+		maxTokens = 1024
 	}
 	switch provider {
 	case "claude":
 		client := anthropic.NewClient(option.WithAPIKey(apiKey))
 		return &LLMParser{model: model, loc: loc, complete: func(ctx context.Context, prompt string) (string, error) {
 			msg, err := client.Messages.New(ctx, anthropic.MessageNewParams{
-				Model: anthropic.F(model), MaxTokens: anthropic.F(int64(1024)),
+				Model: anthropic.F(model), MaxTokens: anthropic.F(int64(maxTokens)),
 				Messages: anthropic.F([]anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock(prompt))}),
 			})
 			if err != nil {
@@ -69,78 +72,127 @@ func NewConfiguredLLMParser(provider, apiKey, model, baseURL string, loc *time.L
 		if _, err := url.ParseRequestURI(baseURL); err != nil {
 			return nil, fmt.Errorf("invalid OpenRouter base URL: %w", err)
 		}
-		return &LLMParser{model: model, loc: loc, complete: openRouterCompleter(apiKey, model, baseURL)}, nil
+		models := append([]string{model}, fallbackModels...)
+		return &LLMParser{model: model, loc: loc, complete: openRouterCompleter(apiKey, models, baseURL, timeout, maxTokens)}, nil
 	default:
 		return nil, fmt.Errorf("unsupported NLU provider %q", provider)
 	}
 }
 
-func openRouterCompleter(apiKey, model, baseURL string) func(context.Context, string) (string, error) {
-	const maxAttempts = 3
-	client := &http.Client{Timeout: 30 * time.Second}
+// openRouterCompleter returns a completion function that tries models in order.
+// On HTTP 429 it immediately moves to the next model; on 5xx it retries the
+// same model up to maxServerRetries times with exponential back-off.
+func openRouterCompleter(apiKey string, models []string, baseURL string, timeout time.Duration, maxTokens int) func(context.Context, string) (string, error) {
+	const maxServerRetries = 2
+	if timeout <= 0 {
+		timeout = 60 * time.Second
+	}
+	client := &http.Client{Timeout: timeout}
 	endpoint := strings.TrimRight(baseURL, "/") + "/chat/completions"
+
 	return func(ctx context.Context, prompt string) (string, error) {
-		payload := struct {
-			Model          string              `json:"model"`
-			Messages       []map[string]string `json:"messages"`
-			ResponseFormat map[string]string   `json:"response_format,omitempty"`
-		}{Model: model, Messages: []map[string]string{{"role": "user", "content": prompt}}, ResponseFormat: map[string]string{"type": "json_object"}}
-		body, err := json.Marshal(payload)
-		if err != nil {
-			return "", err
-		}
 		var lastErr error
-		for attempt := 0; attempt < maxAttempts; attempt++ {
-			req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
-			if err != nil {
-				return "", err
+		for _, model := range models {
+			content, rateLimited, err := callOpenRouterModel(ctx, client, endpoint, apiKey, model, prompt, maxTokens, maxServerRetries)
+			if err == nil {
+				return content, nil
 			}
-			req.Header.Set("Authorization", "Bearer "+apiKey)
-			req.Header.Set("Content-Type", "application/json")
-			resp, err := client.Do(req)
-			if err != nil {
-				lastErr = err
-			} else {
-				data, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-				_ = resp.Body.Close()
-				if readErr != nil {
-					return "", readErr
-				}
-				if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-					var result struct {
-						Choices []struct {
-							Message struct {
-								Content string `json:"content"`
-							} `json:"message"`
-						} `json:"choices"`
-					}
-					if err := json.Unmarshal(data, &result); err != nil {
-						return "", err
-					}
-					if len(result.Choices) == 0 {
-						return "", fmt.Errorf("OpenRouter returned no choices")
-					}
-					return result.Choices[0].Message.Content, nil
-				}
-				lastErr = fmt.Errorf("OpenRouter HTTP %d: %.300s", resp.StatusCode, data)
-				if resp.StatusCode != http.StatusTooManyRequests && resp.StatusCode < 500 {
-					return "", lastErr
-				}
-				if delay, ok := retryAfter(resp.Header.Get("Retry-After")); ok && attempt+1 < maxAttempts {
-					if err := waitForRetry(ctx, delay); err != nil {
-						return "", err
-					}
-					continue
-				}
+			lastErr = err
+			if rateLimited {
+				continue // try next fallback model
 			}
-			if attempt+1 < maxAttempts {
-				if err := waitForRetry(ctx, time.Duration(1<<attempt)*time.Second); err != nil {
-					return "", err
-				}
-			}
+			return "", err // non-429 error — propagate immediately
 		}
 		return "", lastErr
 	}
+}
+
+// callOpenRouterModel calls one specific model, retrying on 5xx.
+// Returns (content, rateLimited=true, nil) on 429 so the caller can fall back.
+func callOpenRouterModel(
+	ctx context.Context,
+	client *http.Client,
+	endpoint, apiKey, model, prompt string,
+	maxTokens, maxRetries int,
+) (string, bool, error) {
+	payload := struct {
+		Model          string              `json:"model"`
+		Messages       []map[string]string `json:"messages"`
+		ResponseFormat map[string]string   `json:"response_format,omitempty"`
+		MaxTokens      int                 `json:"max_tokens"`
+	}{
+		Model:          model,
+		Messages:       []map[string]string{{"role": "user", "content": prompt}},
+		ResponseFormat: map[string]string{"type": "json_object"},
+		MaxTokens:      maxTokens,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return "", false, err
+	}
+
+	var lastErr error
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+		if err != nil {
+			return "", false, err
+		}
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := client.Do(req)
+		if err != nil {
+			lastErr = err
+			if attempt < maxRetries {
+				if werr := waitForRetry(ctx, time.Duration(1<<attempt)*time.Second); werr != nil {
+					return "", false, werr
+				}
+			}
+			continue
+		}
+
+		data, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		_ = resp.Body.Close()
+		if readErr != nil {
+			return "", false, readErr
+		}
+
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			var result struct {
+				Choices []struct {
+					Message struct{ Content string `json:"content"` } `json:"message"`
+				} `json:"choices"`
+			}
+			if err := json.Unmarshal(data, &result); err != nil {
+				return "", false, err
+			}
+			if len(result.Choices) == 0 {
+				return "", false, fmt.Errorf("OpenRouter: no choices for model %s", model)
+			}
+			return result.Choices[0].Message.Content, false, nil
+		}
+
+		lastErr = fmt.Errorf("OpenRouter HTTP %d (model %s): %.300s", resp.StatusCode, model, data)
+
+		if resp.StatusCode == http.StatusTooManyRequests {
+			return "", true, lastErr // signal caller to try next model
+		}
+		if resp.StatusCode < 500 {
+			return "", false, lastErr // 4xx (not 429) — no point retrying
+		}
+
+		// 5xx — retry with back-off
+		if attempt < maxRetries {
+			delay := time.Duration(1<<attempt) * time.Second
+			if ra, ok := retryAfter(resp.Header.Get("Retry-After")); ok {
+				delay = ra
+			}
+			if werr := waitForRetry(ctx, delay); werr != nil {
+				return "", false, werr
+			}
+		}
+	}
+	return "", false, lastErr
 }
 
 func retryAfter(value string) (time.Duration, bool) {
@@ -210,39 +262,34 @@ func buildPrompt(text string, now time.Time) string {
 	return fmt.Sprintf(`Ты — система распознавания намерений (NLU) для бота напоминаний.
 Сейчас: %s (MSK).
 
-Распарси следующий запрос на русском языке и верни строго JSON без markdown-блоков.
+Распарси запрос и верни ТОЛЬКО JSON (без markdown, без пояснений).
+Включай ТОЛЬКО заполненные поля — не добавляй null, 0 или пустые строки.
 
-JSON-схема ответа:
-{
-  "kind": "absolute|recurring|conditional",
-  "trigger": "anchor|threshold|digest",
-  "message": "текст напоминания",
-  "fire_at": "RFC3339",
-  "eval_cron": "cron-выражение",
-  "lead_time": "3h",
-  "top_n": 5,
-  "horizon_days": 30,
-  "event": {
-    "type": "tv_program|price|travel",
-    "title": "название",
-    "params": {"key": "value"}
-  },
-  "confidence": 0.0-1.0,
-  "missing": ["field1"]
-}
+Поля:
+  kind        absolute|recurring|conditional  (обязательно)
+  trigger     anchor|threshold|digest         (для conditional)
+  message     текст напоминания               (обязательно)
+  fire_at     RFC3339                         (для absolute)
+  eval_cron   "0 9 * * *"                     (для recurring/conditional)
+  lead_time   "3h"                            (для anchor)
+  top_n       5                               (для digest)
+  horizon_days 30                             (для digest/anchor)
+  event.type  tv_program|price|travel         (для conditional)
+  event.title название                        (для tv_program/price)
+  event.params {"url":"..."} и т.д.
+  confidence  0.0-1.0                         (обязательно)
+  missing     ["field1"]                      (если чего-то не хватает)
 
 Правила:
 - «напомни завтра в 9:00 текст» → kind=absolute, fire_at=RFC3339
 - «каждый день в 9:00» → kind=recurring, eval_cron="0 9 * * *"
 - «за 3 часа до КВН на Первом» → kind=conditional, trigger=anchor, event.type=tv_program, event.params.channel="Первый канал"
-- «уведоми при снижении цены» + URL → kind=conditional, trigger=threshold, event.type=price, event.params.url=<URL>
+- «уведоми при снижении цены» + URL → kind=conditional, trigger=threshold, event.type=price, event.params.url=<URL>, event.title=название из текста или URL-slug (опусти если неясно)
 - «5 дешёвых билетов СПб→Калининград» → kind=conditional, trigger=digest, event.type=travel
-- horizon_days: «неделя»→7, «месяц»→30, «2 недели»→14, «45 дней»→45, default→30
-- confidence: 0.9+ всё ясно, 0.5-0.9 допущения, <0.5 неясно
+- horizon_days: «неделя»→7, «месяц»→30, «2 недели»→14, default→30
+- confidence: 0.9+ ясно, 0.5-0.9 допущения, <0.5 неясно
 
-Запрос: %s
-
-Ответь только JSON.`, now.Format("02 Jan 2006 15:04 MST"), text)
+Запрос: %s`, now.Format("02 Jan 2006 15:04 MST"), text)
 }
 
 func extractText(msg *anthropic.Message) string {
@@ -280,6 +327,17 @@ func mapToResult(resp *llmResponse) (*ParseResult, error) {
 
 	if resp.Trigger != "" {
 		spec.Trigger = domain.Trigger(resp.Trigger)
+	} else {
+		// Free models sometimes omit trigger even though it's deterministic from
+		// event.type. Infer it so validation doesn't reject an otherwise valid result.
+		switch resp.Event.Type {
+		case "price":
+			spec.Trigger = domain.TriggerThreshold
+		case "tv_program":
+			spec.Trigger = domain.TriggerAnchor
+		case "travel":
+			spec.Trigger = domain.TriggerDigest
+		}
 	}
 	if resp.LeadTime != "" {
 		d, err := time.ParseDuration(resp.LeadTime)

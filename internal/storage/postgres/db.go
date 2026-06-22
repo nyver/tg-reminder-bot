@@ -119,14 +119,8 @@ func (db *DB) ExecUpdateLocked(ctx context.Context, table, workerID string, ids 
 	in := db.InClause(2, len(ids))
 	args := make([]any, 0, 1+len(ids))
 	args = append(args, workerID)
-	if db.Dialect == "sqlite" {
-		for _, id := range ids {
-			args = append(args, id)
-		}
-	} else {
-		for _, id := range ids {
-			args = append(args, id)
-		}
+	for _, id := range ids {
+		args = append(args, id)
 	}
 	q := fmt.Sprintf(`UPDATE %s SET locked_at=%s, locked_by=$1 WHERE id %s`, table, now, in)
 	q = db.Rebind(q)

@@ -1,51 +1,93 @@
+# Все длительности задаются в формате Go time.Duration: 15s, 1m, 24h.
+# Значения ${VAR} подставляются из окружения до разбора YAML.
+
 database:
-  # Драйвер БД: "sqlite" (по умолчанию) или "postgres"
+  # Поддерживаемые драйверы: sqlite и postgres.
   driver: sqlite
-  # SQLite: путь к файлу. Postgres: connection string.
+  # Для SQLite укажите путь к файлу. Каталог должен быть доступен на запись.
   dsn: ./data/remind.db
+  # Пример PostgreSQL DSN:
   # dsn: postgres://remind:remind@localhost:5432/remind?sslmode=disable
+  # DATABASE_URL имеет приоритет над driver и dsn и автоматически выбирает postgres.
 
 telegram:
-  token: ""  # TELEGRAM_TOKEN (или задать здесь)
+  # Токен от BotFather. Непустой TELEGRAM_TOKEN переопределяет это поле.
+  token: "${TELEGRAM_TOKEN}"
 
 nlu:
-  # Провайдер LLM: "claude" или "openrouter"
+  # LLM для разбора естественного языка: openrouter или claude.
   provider: openrouter
-  api_key: ""  # LLM_API_KEY (или задать здесь)
+  # Общий ключ выбранного провайдера. Можно передать через LLM_API_KEY.
+  api_key: "${LLM_API_KEY}"
   claude:
+    # Используется только при provider: claude.
     model: claude-haiku-4-5-20251001
   openrouter:
+    # OpenAI-совместимый endpoint без /chat/completions.
     base_url: https://openrouter.ai/api/v1
+    # Основная модель вызывается первой.
     model: anthropic/claude-haiku-4.5
-    # Другие доступные модели:
-    # model: google/gemini-flash-1.5
-    # model: openai/gpt-4o-mini
-    # model: mistralai/mistral-small
+    # При rate limit (HTTP 429) бот последовательно попробует эти модели.
+    fallback_models:
+      - mistralai/mistral-7b-instruct:free
+      - meta-llama/llama-3.2-3b-instruct:free
+    # Общий таймаут одного обращения к LLM.
+    timeout: 60s
+    # Максимальный размер ответа модели в токенах.
+    max_tokens: 1024
 
 providers:
+  # Резервный EPG Service используется worker, только если iptvx.url пуст.
+  # Он поддерживает TV-напоминания, но не наполняет базу для команды /tv.
   tv:
-    # EPG Service API v1: https://epgservice.ru/en/docs/
-    # Корневой URL API без завершающего слеша.
+    # Документация API v1: https://epgservice.ru/en/docs/
     base_url: https://api.epgservice.ru
-    # Bearer-токен. Если значение пустое, TV-провайдер отключён.
-    # Можно задать напрямую или через EPG_SERVICE_API_KEY.
+    # Bearer-токен; EPG_SERVICE_API_KEY имеет приоритет над YAML.
     api_key: "${EPG_SERVICE_API_KEY}"
-    # Общий timeout одного HTTP-запроса к индексу или расписанию.
+    # Таймаут одного запроса к индексу или расписанию.
     timeout: 15s
+
+  # Основной источник телепрограммы. Worker скачивает XMLTV, импортирует его
+  # в общую БД и обновляет; bot читает эту БД для команды /tv.
+  iptvx:
+    # URL XMLTV/XMLTV.GZ. Пустое значение переключает worker на providers.tv.
+    url: https://iptvx.one/epg/epg.xml.gz
+    # Локальный кеш. Для Docker используйте /data/iptvx_epg.xml.gz.
+    file_path: ./data/iptvx_epg.xml.gz
+    # Период проверки свежести и обновления расписания.
+    update_interval: 168h
+    # Таймаут скачивания большого EPG-файла.
+    timeout: 120s
+
   price:
-    user_agent: remind-bot/1.0
+    # User-Agent для запросов к страницам магазинов.
+    user_agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/125.0 Safari/537.36
+    # Таймаут получения страницы товара.
+    timeout: 15s
+    # Зарезервировано для браузерного провайдера; сейчас не используется.
     headless: false
+
   travel:
+    # Пустой ключ отключает соответствующий источник билетов.
     air_api_key: ""
     rail_api_key: ""
+    # Таймаут запроса к источнику предложений.
     timeout: 10s
+    # Максимальная глубина поиска от текущей даты.
     max_horizon_days: 180
 
 scheduler:
+  # Интервал поиска напоминаний, которые пора вычислить.
   watcher_tick: 1m
+  # Интервал доставки подготовленных Telegram-уведомлений.
   delivery_tick: 15s
+  # Интервал очистки устаревших служебных данных.
+  housekeeping_tick: 1h
 
 server:
+  # Внутренний порт HTTP API. В Compose внешний порт задаётся API_PORT.
   api_port: 8080
+  # Идентификатор worker для lease; пустое значение генерируется автоматически.
   worker_id: ""
+  # Допустимые уровни: debug, info, warn, error.
   log_level: info

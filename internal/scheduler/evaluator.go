@@ -193,7 +193,23 @@ func (e *Evaluator) evaluateThreshold(ctx context.Context, r domain.Reminder) ([
 		Params: r.Spec.Event.Params,
 	})
 	if err != nil {
-		return nil, err
+		e.log.Warn("metric sample failed, will retry next tick",
+			"reminder_id", r.ID,
+			"provider", r.Spec.Event.Type,
+			"err", err,
+		)
+		return nil, nil
+	}
+
+	if !m.Available {
+		return nil, nil
+	}
+
+	// Read previous observation BEFORE saving so prev is truly the last point,
+	// not the record we are about to insert.
+	prev, err := e.history.Last(ctx, r.ID)
+	if err != nil {
+		return nil, fmt.Errorf("history last: %w", err)
 	}
 
 	obs := &domain.Observation{
@@ -205,13 +221,8 @@ func (e *Evaluator) evaluateThreshold(ctx context.Context, r domain.Reminder) ([
 	}
 	_ = e.history.Save(ctx, obs)
 
-	if !m.Available {
-		return nil, nil
-	}
-
-	prev, err := e.history.Last(ctx, r.ID)
-	if err != nil || prev == nil {
-		// First observation — baseline, no notification.
+	if prev == nil {
+		// First observation — establish baseline, no notification yet.
 		return nil, nil
 	}
 	if m.Value >= prev.Value {
@@ -318,8 +329,11 @@ func userIdemKey(userID int64, suffix string) string {
 }
 
 func userTZ(r domain.Reminder) *time.Location {
-	// User TZ is stored on the User entity; for now default to Moscow.
-	// TODO M7: pass user TZ into Reminder or Evaluator context.
+	if r.UserTZ != "" {
+		if loc, err := time.LoadLocation(r.UserTZ); err == nil {
+			return loc
+		}
+	}
 	loc, _ := time.LoadLocation("Europe/Moscow")
 	return loc
 }

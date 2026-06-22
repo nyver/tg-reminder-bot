@@ -43,16 +43,22 @@ func (r *HousekeepingRepo) PruneNotifications(ctx context.Context, retentionDays
 // PruneObservations keeps the most recent `keep` observations per reminder and
 // deletes the rest, provided they are older than 1 day (safety window so that
 // the current day's data is never truncated mid-run). Returns deleted row count.
+//
+// Uses ROW_NUMBER() window function instead of a correlated subquery+LIMIT,
+// which is not supported by PostgreSQL in this context.
 func (r *HousekeepingRepo) PruneObservations(ctx context.Context, keep int) (int64, error) {
 	q := r.db.Rebind(`
 		DELETE FROM observations
-		WHERE observed_at < ` + r.db.DaysAgo(1) + `
-		  AND id NOT IN (
-		    SELECT id FROM observations o2
-		    WHERE o2.reminder_id = observations.reminder_id
-		    ORDER BY o2.observed_at DESC
-		    LIMIT $1
-		  )`)
+		WHERE id IN (
+		  SELECT id FROM (
+		    SELECT id,
+		           observed_at,
+		           ROW_NUMBER() OVER (PARTITION BY reminder_id ORDER BY observed_at DESC) AS rn
+		    FROM observations
+		  ) ranked
+		  WHERE rn > $1
+		    AND observed_at < ` + r.db.DaysAgo(1) + `
+		)`)
 	res, err := r.db.ExecContext(ctx, q, keep)
 	if err != nil {
 		return 0, err

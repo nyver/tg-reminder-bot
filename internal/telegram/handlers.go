@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/nyver2k/remindertgbot/internal/domain"
 	"github.com/nyver2k/remindertgbot/internal/nlu"
+	"github.com/nyver2k/remindertgbot/internal/provider"
 	"github.com/robfig/cron/v3"
 	tele "gopkg.in/telebot.v3"
 )
@@ -34,11 +35,19 @@ type UserService interface {
 	SetTZ(ctx context.Context, userID int64, tz string) error
 }
 
+// PriceProber fetches the current price of a product URL.
+// Used only in the confirmation dialog; nil disables price preview.
+type PriceProber interface {
+	Sample(ctx context.Context, q provider.Query) (provider.Measurement, error)
+}
+
 type Handler struct {
 	reminders ReminderService
 	users     UserService
 	dialogs   DialogStore
 	parser    nlu.Parser
+	prices    PriceProber          // optional
+	schedule  provider.TVScheduler // optional
 	log       *slog.Logger
 }
 
@@ -47,6 +56,8 @@ func NewHandler(
 	users UserService,
 	dialogs DialogStore,
 	parser nlu.Parser,
+	prices PriceProber,
+	schedule provider.TVScheduler,
 	log *slog.Logger,
 ) *Handler {
 	return &Handler{
@@ -54,6 +65,8 @@ func NewHandler(
 		users:     users,
 		dialogs:   dialogs,
 		parser:    parser,
+		prices:    prices,
+		schedule:  schedule,
 		log:       log,
 	}
 }
@@ -67,6 +80,7 @@ func (h *Handler) RegisterRoutes(bot *tele.Bot) {
 	bot.Handle("/pause", h.handlePause)
 	bot.Handle("/resume", h.handleResume)
 	bot.Handle("/tz", h.handleTZ)
+	bot.Handle("/tv", h.handleTV)
 	bot.Handle(tele.OnText, h.handleText)
 	bot.Handle("\fconfirm_yes", h.handleConfirmYes)
 	bot.Handle("\fconfirm_no", h.handleConfirmNo)
@@ -170,7 +184,10 @@ func (h *Handler) handleTZ(c tele.Context) error {
 	ctx := context.Background()
 	tz := strings.TrimSpace(c.Message().Payload)
 	if tz == "" {
-		u, _ := h.users.GetOrCreate(ctx, c.Sender().ID)
+		u, err := h.users.GetOrCreate(ctx, c.Sender().ID)
+		if err != nil {
+			return c.Send("Не удалось получить профиль. Попробуйте позже.")
+		}
 		return c.Send(fmt.Sprintf("Текущий часовой пояс: `%s`\nДля изменения: `/tz Europe/Moscow`", u.TZ), tele.ModeMarkdown)
 	}
 	if _, err := time.LoadLocation(tz); err != nil {
@@ -180,6 +197,102 @@ func (h *Handler) handleTZ(c tele.Context) error {
 		return c.Send("Ошибка при сохранении часового пояса.")
 	}
 	return c.Send(fmt.Sprintf("✅ Часовой пояс установлен: `%s`", tz), tele.ModeMarkdown)
+}
+
+var ruMonths = [13]string{"", "янв", "фев", "мар", "апр", "май", "июн", "июл", "авг", "сен", "окт", "ноя", "дек"}
+var ruWeekdays = [7]string{"вс", "пн", "вт", "ср", "чт", "пт", "сб"}
+
+func (h *Handler) handleTV(c tele.Context) error {
+	if h.schedule == nil {
+		return c.Send("Расписание телепрограмм недоступно.")
+	}
+
+	args := strings.TrimSpace(c.Message().Payload)
+	if args == "" {
+		return c.Send(
+			"Использование:\n`/tv КВН` — расписание на всех каналах\n`/tv КВН | Первый канал` — только на заданном канале",
+			tele.ModeMarkdown,
+		)
+	}
+
+	title, channel := args, ""
+	if i := strings.Index(args, " | "); i >= 0 {
+		title = strings.TrimSpace(args[:i])
+		channel = strings.TrimSpace(args[i+3:])
+	}
+	if title == "" {
+		return c.Send("Укажите название программы.")
+	}
+
+	ctx := context.Background()
+	userID := c.Sender().ID
+
+	loc, _ := time.LoadLocation("Europe/Moscow")
+	if u, err := h.users.GetOrCreate(ctx, userID); err == nil && u.TZ != "" {
+		if l, err := time.LoadLocation(u.TZ); err == nil {
+			loc = l
+		}
+	}
+
+	now := time.Now()
+	shows, err := h.schedule.QuerySchedule(ctx, title, channel, now, now.Add(7*24*time.Hour))
+	if err != nil {
+		h.log.Error("tv schedule query", "err", err)
+		return c.Send("Ошибка при запросе расписания. Попробуйте позже.")
+	}
+
+	if len(shows) == 0 {
+		if channel != "" {
+			return c.Send(fmt.Sprintf(
+				"Программа *%s* на *%s* не найдена в расписании на ближайшую неделю.",
+				escapeMarkdown(title), escapeMarkdown(channel),
+			), tele.ModeMarkdown)
+		}
+		return c.Send(fmt.Sprintf(
+			"Программа *%s* не найдена в расписании на ближайшую неделю.",
+			escapeMarkdown(title),
+		), tele.ModeMarkdown)
+	}
+
+	const maxShows = 50
+	truncated := len(shows) > maxShows
+	if truncated {
+		shows = shows[:maxShows]
+	}
+
+	var sb strings.Builder
+	if channel != "" {
+		sb.WriteString(fmt.Sprintf("📺 *%s* на *%s*:\n\n", escapeMarkdown(title), escapeMarkdown(channel)))
+	} else {
+		sb.WriteString(fmt.Sprintf("📺 *%s*:\n\n", escapeMarkdown(title)))
+	}
+
+	var curDay string
+	for _, show := range shows {
+		local := show.StartsAt.In(loc)
+		day := fmt.Sprintf("%s, %d %s", ruWeekdays[local.Weekday()], local.Day(), ruMonths[local.Month()])
+		if day != curDay {
+			curDay = day
+			sb.WriteString(fmt.Sprintf("*%s*\n", day))
+		}
+
+		timeStr := local.Format("15:04")
+		line := fmt.Sprintf("  `%s`", timeStr)
+		if !show.EndsAt.IsZero() {
+			line = fmt.Sprintf("  `%s–%s`", timeStr, show.EndsAt.In(loc).Format("15:04"))
+		}
+		line += " — " + escapeMarkdown(show.Title)
+		if channel == "" && show.Channel != "" {
+			line += " [" + escapeMarkdown(show.Channel) + "]"
+		}
+		sb.WriteString(line + "\n")
+	}
+
+	if truncated {
+		sb.WriteString(fmt.Sprintf("\n_...показаны первые %d результатов_", maxShows))
+	}
+
+	return c.Send(sb.String(), tele.ModeMarkdown)
 }
 
 func (h *Handler) handleText(c tele.Context) error {
@@ -242,7 +355,7 @@ func (h *Handler) startParsing(ctx context.Context, c tele.Context, userID int64
 	}
 	if err := validateParseResult(result); err != nil {
 		h.log.Warn("invalid parse result", "err", err, "confidence", result.Confidence)
-		return c.Send("Не удалось определить все параметры напоминания. Попробуйте указать передачу, канал и время уведомления точнее.")
+		return c.Send("Не удалось определить все параметры напоминания. Попробуйте переформулировать.")
 	}
 
 	// Show confirmation.
@@ -265,7 +378,7 @@ func (h *Handler) askConfirmation(ctx context.Context, c tele.Context, userID in
 		Context: ctxJSON,
 	})
 
-	confirmMsg := fmt.Sprintf("*Создать напоминание?*\n\n%s", formatSpec(result.Spec))
+	confirmMsg := fmt.Sprintf("*Создать напоминание?*\n\n%s", h.formatConfirmSpec(ctx, result.Spec))
 	menu := &tele.ReplyMarkup{}
 	menu.Inline(
 		menu.Row(
@@ -274,6 +387,71 @@ func (h *Handler) askConfirmation(ctx context.Context, c tele.Context, userID in
 		),
 	)
 	return c.Send(confirmMsg, menu, tele.ModeMarkdown)
+}
+
+// formatConfirmSpec builds the human-readable spec block for the confirmation
+// dialog. For price-drop reminders it probes the current price (best-effort).
+func (h *Handler) formatConfirmSpec(ctx context.Context, spec *domain.Spec) string {
+	base := formatSpec(spec)
+	if spec == nil || spec.Trigger != domain.TriggerThreshold || spec.Event.Type != "price" {
+		return base
+	}
+	if h.prices == nil {
+		return base
+	}
+
+	priceCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+
+	m, err := h.prices.Sample(priceCtx, provider.Query{
+		Title:  spec.Event.Title,
+		Params: spec.Event.Params,
+	})
+	if err != nil {
+		h.log.Warn("price probe for confirmation failed", "err", err)
+		return base
+	}
+	if !m.Available || m.Value <= 0 {
+		return base
+	}
+
+	// Update spec title from page if NLU left it empty.
+	title := spec.Event.Title
+	if title == "" && m.Title != "" {
+		title = m.Title
+	}
+
+	var sb strings.Builder
+	if title != "" {
+		sb.WriteString("📌 *" + escapeMarkdown(title) + "*\n")
+	}
+	sb.WriteString(fmt.Sprintf("💰 Текущая цена: *%s*\n", formatPriceRub(m.Value, m.Currency)))
+	sb.WriteString("📉 Уведомить при снижении цены\n")
+	if u := spec.Event.Params["url"]; u != "" {
+		sb.WriteString(fmt.Sprintf("🔗 %s\n", escapeMarkdown(u)))
+	}
+	return sb.String()
+}
+
+func formatPriceRub(kopecks int64, currency string) string {
+	rubles := kopecks / 100
+	sym := "₽"
+	switch currency {
+	case "USD":
+		sym = "$"
+	case "EUR":
+		sym = "€"
+	}
+	// Format with thousands separator.
+	s := strconv.FormatInt(rubles, 10)
+	var result []byte
+	for i, c := range []byte(s) {
+		if i > 0 && (len(s)-i)%3 == 0 {
+			result = append(result, ' ') // non-breaking space
+		}
+		result = append(result, c)
+	}
+	return string(result) + " " + sym
 }
 
 func (h *Handler) handleConfirmYes(c tele.Context) error {
@@ -463,12 +641,25 @@ func validateParseResult(result *nlu.ParseResult) error {
 			return err
 		}
 	case domain.KindConditional:
-		if result.Spec.Trigger == "" || result.Spec.Event.Type == "" || result.Spec.Event.Title == "" {
+		if result.Spec.Trigger == "" || result.Spec.Event.Type == "" {
 			return fmt.Errorf("conditional reminder is incomplete")
 		}
-		if result.Spec.Event.Type == "tv_program" &&
-			result.Spec.Event.Params["channel"] == "" && result.Spec.Event.Params["channel_id"] == "" {
-			return fmt.Errorf("TV reminder has no channel")
+		switch result.Spec.Event.Type {
+		case "price":
+			if result.Spec.Event.Params["url"] == "" {
+				return fmt.Errorf("price reminder requires event.params.url")
+			}
+		case "tv_program":
+			if result.Spec.Event.Title == "" {
+				return fmt.Errorf("TV reminder has no title")
+			}
+			if result.Spec.Event.Params["channel"] == "" && result.Spec.Event.Params["channel_id"] == "" {
+				return fmt.Errorf("TV reminder has no channel")
+			}
+		default:
+			if result.Spec.Event.Title == "" {
+				return fmt.Errorf("conditional reminder is incomplete")
+			}
 		}
 	default:
 		return fmt.Errorf("unknown reminder kind %q", kind)
@@ -577,6 +768,7 @@ const msgWelcome = `*Привет! Я бот напоминаний.*
 • «каждый будний день в 9:00 напоминай выпить таблетку»
 • «уведоми за 3 часа до КВН на Первом канале»
 
+/tv — расписание TV программ
 /help — справка
 /list — список напоминаний`
 
@@ -588,6 +780,8 @@ const msgHelp = `*Команды:*
 /pause <id> — приостановить
 /resume <id> — возобновить
 /tz <зона> — установить часовой пояс (например, Europe/Moscow)
+/tv <программа> — расписание на ближайшую неделю
+/tv <программа> | <канал> — расписание на конкретном канале
 /help — эта справка
 
 *Примеры напоминаний:*

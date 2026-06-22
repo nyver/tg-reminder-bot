@@ -13,10 +13,18 @@ import (
 
 type eventProviderFunc func(context.Context, provider.Query, time.Time, time.Time) ([]provider.Event, error)
 
+type metricProviderFunc func(context.Context, provider.Query) (provider.Measurement, error)
+
 func (eventProviderFunc) Type() string { return "tv_program" }
 
 func (f eventProviderFunc) Lookup(ctx context.Context, q provider.Query, from, to time.Time) ([]provider.Event, error) {
 	return f(ctx, q, from, to)
+}
+
+func (metricProviderFunc) Type() string { return "price" }
+
+func (f metricProviderFunc) Sample(ctx context.Context, q provider.Query) (provider.Measurement, error) {
+	return f(ctx, q)
 }
 
 func TestAnchorNotifiesImmediatelyWhenLeadTimeWasMissed(t *testing.T) {
@@ -66,6 +74,33 @@ func TestAnchorTransientErrorReturnsNil(t *testing.T) {
 	}
 	if len(planned) != 0 {
 		t.Fatalf("expected no notifications on transient error, got %+v", planned)
+	}
+}
+
+func TestThresholdProviderErrorReturnsNil(t *testing.T) {
+	now := time.Date(2026, 6, 22, 8, 0, 0, 0, time.UTC)
+	registry := provider.NewRegistry()
+	registry.RegisterMetric(metricProviderFunc(func(context.Context, provider.Query) (provider.Measurement, error) {
+		return provider.Measurement{}, &netError{temporary: true}
+	}))
+	evaluator := NewEvaluator(registry, nil, clock.NewFake(now), 180, nil)
+	rem := domain.Reminder{
+		ID: uuid.New(), Kind: domain.KindConditional,
+		Spec: domain.Spec{
+			Trigger: domain.TriggerThreshold,
+			Event: domain.EventSpec{
+				Type:   "price",
+				Params: map[string]string{"url": "https://shop.test/product"},
+			},
+		},
+	}
+
+	planned, err := evaluator.Evaluate(context.Background(), rem)
+	if err != nil {
+		t.Fatalf("expected nil error on provider failure, got: %v", err)
+	}
+	if len(planned) != 0 {
+		t.Fatalf("expected no notifications on provider error, got %+v", planned)
 	}
 }
 

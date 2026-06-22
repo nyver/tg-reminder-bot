@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -38,6 +39,51 @@ func (m *memStore) Channels(_ context.Context) ([]EPGChannel, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.channels, nil
+}
+
+func (m *memStore) HasFutureSchedule(_ context.Context) (bool, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	now := time.Now()
+	for _, p := range m.progs {
+		if p.StartsAt.After(now) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (m *memStore) SearchProgrammes(_ context.Context, titleLike, channelID string, from, to time.Time) ([]EPGSearchResult, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	pattern := strings.ToLower(titleLike)
+	var out []EPGSearchResult
+	for _, p := range m.progs {
+		if channelID != "" && p.ChannelID != channelID {
+			continue
+		}
+		if p.StartsAt.Before(from) || !p.StartsAt.Before(to) {
+			continue
+		}
+		if pattern != "" && !strings.Contains(strings.ToLower(p.Title), pattern) {
+			continue
+		}
+		chName := p.ChannelID
+		for _, ch := range m.channels {
+			if ch.ID == p.ChannelID {
+				chName = ch.DisplayName
+				break
+			}
+		}
+		out = append(out, EPGSearchResult{
+			ChannelID:   p.ChannelID,
+			ChannelName: chName,
+			Title:       p.Title,
+			StartsAt:    p.StartsAt,
+			EndsAt:      p.EndsAt,
+		})
+	}
+	return out, nil
 }
 
 func (m *memStore) Programmes(_ context.Context, channelID string, from, to time.Time) ([]EPGProgramme, error) {

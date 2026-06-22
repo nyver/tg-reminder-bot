@@ -40,8 +40,11 @@ type ClaudeConfig struct {
 }
 
 type OpenRouterConfig struct {
-	BaseURL string `yaml:"base_url"`
-	Model   string `yaml:"model"`
+	BaseURL        string        `yaml:"base_url"`
+	Model          string        `yaml:"model"`
+	FallbackModels []string      `yaml:"fallback_models"`
+	Timeout        time.Duration `yaml:"timeout"`
+	MaxTokens      int           `yaml:"max_tokens"`
 }
 
 type ProvidersConfig struct {
@@ -65,8 +68,9 @@ type IPTVXConfig struct {
 }
 
 type PriceConfig struct {
-	UserAgent string `yaml:"user_agent"`
-	Headless  bool   `yaml:"headless"`
+	UserAgent string        `yaml:"user_agent"`
+	Timeout   time.Duration `yaml:"timeout"`
+	Headless  bool          `yaml:"headless"`
 }
 
 type TravelConfig struct {
@@ -144,8 +148,14 @@ func defaults() *Config {
 				Model: "claude-haiku-4-5-20251001",
 			},
 			OpenRouter: OpenRouterConfig{
-				BaseURL: "https://openrouter.ai/api/v1",
-				Model:   "anthropic/claude-haiku-4.5",
+				BaseURL:   "https://openrouter.ai/api/v1",
+				Model:     "anthropic/claude-haiku-4.5",
+				Timeout:   60 * time.Second,
+				MaxTokens: 1024,
+				FallbackModels: []string{
+					"mistralai/mistral-7b-instruct:free",
+					"meta-llama/llama-3.2-3b-instruct:free",
+				},
 			},
 		},
 		Providers: ProvidersConfig{
@@ -160,7 +170,8 @@ func defaults() *Config {
 				Timeout:        120 * time.Second,
 			},
 			Price: PriceConfig{
-				UserAgent: "remind-bot/1.0",
+				UserAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+				Timeout:   15 * time.Second,
 			},
 			Travel: TravelConfig{
 				Timeout:        10 * time.Second,
