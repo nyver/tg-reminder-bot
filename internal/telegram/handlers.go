@@ -230,9 +230,9 @@ func (h *Handler) handleTV(c tele.Context) error {
 	}
 
 	title, channel := args, ""
-	if i := strings.Index(args, " | "); i >= 0 {
-		title = strings.TrimSpace(args[:i])
-		channel = strings.TrimSpace(args[i+3:])
+	if parts := strings.SplitN(args, "|", 2); len(parts) == 2 {
+		title = strings.TrimSpace(parts[0])
+		channel = strings.TrimSpace(parts[1])
 	}
 
 	// Empty title + channel → full channel day schedule.

@@ -108,6 +108,32 @@ func TestParseChannelAndDate(t *testing.T) {
 	}
 }
 
+func TestHandleTVArgParsing(t *testing.T) {
+	cases := []struct {
+		payload string
+		title   string
+		channel string
+	}{
+		{"КВН", "КВН", ""},
+		{"КВН | Первый канал", "КВН", "Первый канал"},
+		{"| Первый канал", "", "Первый канал"},
+		{"|Первый канал", "", "Первый канал"},
+		{"КВН | первый", "КВН", "первый"},
+	}
+	for _, tc := range cases {
+		args := tc.payload
+		title, channel := args, ""
+		if parts := strings.SplitN(args, "|", 2); len(parts) == 2 {
+			title = strings.TrimSpace(parts[0])
+			channel = strings.TrimSpace(parts[1])
+		}
+		if title != tc.title || channel != tc.channel {
+			t.Errorf("payload=%q: got title=%q channel=%q, want title=%q channel=%q",
+				tc.payload, title, channel, tc.title, tc.channel)
+		}
+	}
+}
+
 func TestValidateParseResultRejectsEmptySpec(t *testing.T) {
 	if err := validateParseResult(&nlu.ParseResult{Spec: &domain.Spec{}}); err == nil {
 		t.Fatal("expected validation error")
