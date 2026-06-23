@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -209,8 +210,9 @@ func (e *Evaluator) evaluateThreshold(ctx context.Context, r domain.Reminder) ([
 
 	// Read previous observation BEFORE saving so prev is truly the last point,
 	// not the record we are about to insert.
+	// ErrNotFound is expected on the very first evaluation — treat as nil prev.
 	prev, err := e.history.Last(ctx, r.ID)
-	if err != nil {
+	if err != nil && !errors.Is(err, domain.ErrNotFound) {
 		return nil, fmt.Errorf("history last: %w", err)
 	}
 
