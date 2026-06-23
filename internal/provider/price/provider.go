@@ -291,6 +291,30 @@ func (p *Provider) fetchPageHeadless(rawURL string) ([]byte, error) {
 			}
 			return chromedp.Sleep(2 * time.Second).Do(ctx)
 		}),
+		// If we waited for a challenge but the page is still the spinner,
+		// try navigating to the URL once more — the challenge script may have
+		// silently set cookies without triggering a DOM redirect (ServicePipe
+		// sometimes does this). A second request with valid cookies will load
+		// the real page.
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			if !resolvedChallenge {
+				return nil
+			}
+			var stillChallenge bool
+			if err := chromedp.Evaluate(
+				`document.body.innerHTML.includes('servicepipe.ru') `+
+					`|| (document.title === '' && document.body.innerHTML.length < 10000)`,
+				&stillChallenge,
+			).Do(ctx); err != nil || !stillChallenge {
+				return nil
+			}
+			// Second attempt: cookies may now be set.
+			if err := chromedp.Navigate(rawURL).Do(ctx); err != nil {
+				return nil
+			}
+			_ = chromedp.WaitReady("body", chromedp.ByQuery).Do(ctx)
+			return chromedp.Poll(`document.readyState === "complete"`, nil).Do(ctx)
+		}),
 		chromedp.Evaluate(`document.documentElement.outerHTML`, &html),
 	); err != nil {
 		return nil, fmt.Errorf("headless fetch: %w", err)
@@ -331,12 +355,16 @@ func (p *Provider) Sample(ctx context.Context, q provider.Query) (provider.Measu
 
 	kopecks, currency, pageTitle, found := extractPrice(body)
 	if !found || kopecks <= 0 {
-		p.log.Warn("price: extraction found nothing",
+		logArgs := []any{
 			"url", rawURL,
 			"headless", p.headless,
 			"page_title", extractPageTitle(body),
 			"body_len", len(body),
-		)
+		}
+		if p.headless && len(body) < 10000 && bytes.Contains(body, []byte("servicepipe.ru")) {
+			logArgs = append(logArgs, "hint", "ServicePipe WAF blocked headless request — configure proxy_url (residential proxy) to bypass")
+		}
+		p.log.Warn("price: extraction found nothing", logArgs...)
 		return provider.Measurement{Available: true, Title: q.Title}, nil
 	}
 
