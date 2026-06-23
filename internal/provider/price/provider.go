@@ -68,7 +68,7 @@ func New(userAgent string, timeout time.Duration, headless bool, proxyURL string
 		log.Info("price: headless mode enabled — Chromium required in runtime")
 	}
 	if proxyURL != "" {
-		log.Info("price: proxy configured", "proxy_url", proxyURL)
+		log.Info("price: proxy configured", "proxy_url", redactURL(proxyURL))
 	}
 	return &Provider{
 		httpClient: &http.Client{Timeout: timeout, Jar: jar, Transport: transport},
@@ -819,6 +819,39 @@ func ParsePrice(s string) (int64, string, error) {
 	return kopecks, currency, nil
 }
 
+// privateNets contains RFC-1918 + link-local + loopback ranges checked by isPrivateHost.
+var privateNets []*net.IPNet
+
+func init() {
+	for _, cidr := range []string{
+		"127.0.0.0/8",    // loopback
+		"10.0.0.0/8",     // RFC-1918 class A
+		"172.16.0.0/12",  // RFC-1918 class B (172.16–31)
+		"192.168.0.0/16", // RFC-1918 class C
+		"169.254.0.0/16", // link-local / AWS metadata (169.254.169.254)
+		"::1/128",        // IPv6 loopback
+		"fc00::/7",       // IPv6 ULA
+		"fe80::/10",      // IPv6 link-local
+	} {
+		_, network, _ := net.ParseCIDR(cidr)
+		if network != nil {
+			privateNets = append(privateNets, network)
+		}
+	}
+}
+
+// redactURL replaces the password in a proxy URL with "***" before logging.
+func redactURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.User == nil {
+		return raw
+	}
+	if _, hasPass := u.User.Password(); hasPass {
+		u.User = url.UserPassword(u.User.Username(), "***")
+	}
+	return u.String()
+}
+
 // --- URL validation ---
 
 func validateURL(raw string) error {
@@ -836,10 +869,16 @@ func validateURL(raw string) error {
 }
 
 func isPrivateHost(host string) bool {
-	private := []string{"localhost", "127.", "10.", "192.168.", "172.16.", "::1", "0.0.0.0"}
-	h := strings.ToLower(host)
-	for _, p := range private {
-		if strings.HasPrefix(h, p) {
+	h := strings.ToLower(strings.TrimSpace(host))
+	if h == "localhost" || h == "0.0.0.0" {
+		return true
+	}
+	ip := net.ParseIP(h)
+	if ip == nil {
+		return false
+	}
+	for _, private := range privateNets {
+		if private.Contains(ip) {
 			return true
 		}
 	}

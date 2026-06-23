@@ -224,7 +224,9 @@ func (e *Evaluator) evaluateThreshold(ctx context.Context, r domain.Reminder) ([
 		Title:      m.Title,
 		ObservedAt: now,
 	}
-	_ = e.history.Save(ctx, obs)
+	if err := e.history.Save(ctx, obs); err != nil {
+		e.log.Warn("save observation failed", "reminder_id", r.ID, "err", err)
+	}
 
 	if prev == nil {
 		// First observation — establish baseline, no notification yet.
@@ -271,14 +273,16 @@ func (e *Evaluator) evaluateDigest(ctx context.Context, r domain.Reminder) ([]Pl
 	prev, _ := e.history.Last(ctx, r.ID)
 	rawJSON, _ := json.Marshal(top)
 	minPrice := top[0].Price
-	_ = e.history.Save(ctx, &domain.Observation{
+	if err := e.history.Save(ctx, &domain.Observation{
 		ReminderID: r.ID,
 		Value:      minPrice,
 		Currency:   top[0].Currency,
 		Available:  true,
 		Raw:        rawJSON,
 		ObservedAt: now,
-	})
+	}); err != nil {
+		e.log.Warn("save digest observation failed", "reminder_id", r.ID, "err", err)
+	}
 
 	text := renderDigest(r.Spec, top, prev, from, to)
 	key := userIdemKey(r.UserID, "digest:"+now.In(userTZ(r)).Format("2006-01-02"))

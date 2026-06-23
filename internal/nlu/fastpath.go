@@ -119,9 +119,6 @@ func parsePollCron(text string) string {
 	if m := rePollOnceIn.FindStringSubmatch(text); m != nil {
 		return intervalToCron(m[1], m[2])
 	}
-	if rePollEveryHour.MatchString(text) {
-		return "0 * * * *"
-	}
 	return ""
 }
 

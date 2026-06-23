@@ -148,11 +148,7 @@ func nextEval(rem domain.Reminder) *time.Time {
 	if err != nil {
 		return nil
 	}
-	loc, locErr := time.LoadLocation("Europe/Moscow")
-	if locErr != nil {
-		loc = time.UTC
-	}
-	next := schedule.Next(time.Now().In(loc))
+	next := schedule.Next(time.Now().In(userTZ(rem)))
 	return &next
 }
 

@@ -228,12 +228,12 @@ func (h *Handler) handleRefresh(c tele.Context) error {
 		var sb strings.Builder
 		sb.WriteString("⚠️ Не удалось получить текущую цену\n")
 		if u := rem.Spec.Event.Params["url"]; u != "" {
-			sb.WriteString(u + "\n")
+			sb.WriteString(escapeMarkdown(u) + "\n")
 		}
 		if m.HTTPStatus > 0 {
 			sb.WriteString(fmt.Sprintf("\nHTTP статус: *%d*", m.HTTPStatus))
 		}
-		return c.Send(sb.String(), tele.ModeMarkdown)
+		return c.Send(sb.String(), tele.ModeMarkdownV2)
 	}
 
 	title := rem.Spec.Event.Title
@@ -264,7 +264,7 @@ func (h *Handler) handleRefresh(c tele.Context) error {
 	if u := rem.Spec.Event.Params["url"]; u != "" {
 		sb.WriteString("🔗 " + escapeMarkdown(u))
 	}
-	return c.Send(sb.String(), tele.ModeMarkdown)
+	return c.Send(sb.String(), tele.ModeMarkdownV2)
 }
 
 func (h *Handler) handlePause(c tele.Context) error {

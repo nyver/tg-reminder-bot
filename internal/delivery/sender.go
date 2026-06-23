@@ -1,10 +1,6 @@
 package delivery
 
-import (
-	"context"
-
-	"github.com/nyver2k/remindertgbot/internal/domain"
-)
+import "context"
 
 // Sender delivers a notification to the end user.
 type Sender interface {
@@ -24,9 +20,4 @@ type SentMessage struct {
 func (f *FakeSender) Send(_ context.Context, userID int64, text string) error {
 	f.Sent = append(f.Sent, SentMessage{UserID: userID, Text: text})
 	return nil
-}
-
-// ReminderLookup resolves UserID from a notification.
-type ReminderLookup interface {
-	Get(ctx context.Context, id interface{}) (*domain.Reminder, error)
 }

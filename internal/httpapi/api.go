@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -67,10 +69,36 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/notifications/{id}/retry", s.handleRetryNotification)
 }
 
+// requireToken is an HTTP middleware that enforces Bearer-token authentication
+// on all routes except /healthz and /readyz.
+// The token is read from the ADMIN_API_TOKEN environment variable at call time.
+// If the variable is not set, every protected request is rejected with 403.
+func (s *Server) requireToken(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p := r.URL.Path
+		if p == "/healthz" || p == "/readyz" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		token := os.Getenv("ADMIN_API_TOKEN")
+		if token == "" {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin API disabled: set ADMIN_API_TOKEN"})
+			return
+		}
+		auth := r.Header.Get("Authorization")
+		if !strings.HasPrefix(auth, "Bearer ") || auth[len("Bearer "):] != token {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="remindbot-admin"`)
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func (s *Server) Run(ctx context.Context, port int) error {
 	srv := &http.Server{
 		Addr:    fmt.Sprintf(":%d", port),
-		Handler: s.mux,
+		Handler: s.requireToken(s.mux),
 	}
 	go func() {
 		<-ctx.Done()
@@ -124,7 +152,8 @@ func (s *Server) handleListObservations(w http.ResponseWriter, r *http.Request) 
 	}
 	obs, err := s.observations.List(r.Context(), id, 30)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		s.log.Error("list observations", "id", id, "err", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
 	writeJSON(w, http.StatusOK, obs)
@@ -138,7 +167,8 @@ func (s *Server) handleCancelReminder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.reminders.UpdateStatus(r.Context(), id, domain.StatusDone); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		s.log.Error("cancel reminder", "id", id, "err", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "cancelled"})
