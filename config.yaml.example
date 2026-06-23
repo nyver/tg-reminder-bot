@@ -25,12 +25,12 @@ nlu:
   openrouter:
     # OpenAI-совместимый endpoint без /chat/completions.
     base_url: https://openrouter.ai/api/v1
-    # Основная модель вызывается первой.
-    model: anthropic/claude-haiku-4.5
+    # Основная модель вызывается первой. Полный каталог: https://openrouter.ai/models
+    model: anthropic/claude-haiku-4-5
     # При rate limit (HTTP 429) бот последовательно попробует эти модели.
     fallback_models:
-      - mistralai/mistral-7b-instruct:free
-      - meta-llama/llama-3.2-3b-instruct:free
+      - google/gemma-3-27b-it:free
+      - meta-llama/llama-3.3-70b-instruct:free
     # Общий таймаут одного обращения к LLM.
     timeout: 60s
     # Максимальный размер ответа модели в токенах.
@@ -51,10 +51,12 @@ providers:
   # в общую БД и обновляет; bot читает эту БД для команды /tv.
   iptvx:
     # URL XMLTV/XMLTV.GZ. Пустое значение переключает worker на providers.tv.
+    # Полный архив (~100 MB): https://iptvx.one/epg/epg.xml.gz
+    # Облегчённый (~15 MB):   https://iptvx.one/epg/epg_lite.xml.gz
     url: https://iptvx.one/epg/epg.xml.gz
     # Локальный кеш. Для Docker используйте /data/iptvx_epg.xml.gz.
     file_path: ./data/iptvx_epg.xml.gz
-    # Период проверки свежести и обновления расписания.
+    # Период проверки свежести и обновления расписания (файл выходит раз в неделю).
     update_interval: 168h
     # Таймаут скачивания большого EPG-файла.
     timeout: 120s

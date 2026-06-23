@@ -326,11 +326,13 @@ go run ./cmd/worker
 go run ./cmd/api
 ```
 
-Тесты и статический анализ:
+Тесты, форматирование и статический анализ:
 
 ```bash
-go test ./...
+go test ./... -race -count=1
 go vet ./...
+gofmt -s -w .
+golangci-lint run ./...
 ```
 
 ## CLI

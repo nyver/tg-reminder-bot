@@ -132,6 +132,8 @@ func (p *Provider) fetchPageHeadless(rawURL string) ([]byte, error) {
 	tabCtx, timeoutCancel := context.WithTimeout(tabCtx, p.timeout)
 	defer timeoutCancel()
 
+	p.log.Debug("price: headless fetch", "url", rawURL)
+
 	var html string
 	if err := chromedp.Run(tabCtx,
 		// Patch navigator.webdriver before any page script runs.
@@ -169,6 +171,11 @@ func (p *Provider) fetchPageHeadless(rawURL string) ([]byte, error) {
 	); err != nil {
 		return nil, fmt.Errorf("headless fetch: %w", err)
 	}
+	p.log.Debug("price: headless response",
+		"url", rawURL,
+		"page_title", extractPageTitle([]byte(html)),
+		"html_len", len(html),
+	)
 	return []byte(html), nil
 }
 
@@ -278,6 +285,12 @@ func (p *Provider) fetchPage(ctx context.Context, rawURL, referer string) ([]byt
 		req.Header.Set("Sec-Fetch-Site", "none")
 	}
 
+	p.log.Debug("price: request",
+		"url", rawURL,
+		"referer", referer,
+		"req_headers", req.Header,
+	)
+
 	var resp *http.Response
 	for attempt := 1; attempt <= maxFetchAttempts; attempt++ {
 		resp, err = p.httpClient.Do(req)
@@ -305,12 +318,21 @@ func (p *Provider) fetchPage(ctx context.Context, rawURL, referer string) ([]byt
 	}
 	defer resp.Body.Close()
 
+	p.log.Debug("price: response",
+		"url", rawURL,
+		"status", resp.StatusCode,
+		"resp_headers", resp.Header,
+	)
+
 	if resp.StatusCode != http.StatusOK {
 		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
 		_, _ = io.Copy(io.Discard, resp.Body)
-		if len(snippet) > 0 {
-			p.log.Debug("price fetch non-200", "status", resp.StatusCode, "url", rawURL, "snippet", string(snippet))
-		}
+		p.log.Debug("price fetch non-200",
+			"status", resp.StatusCode,
+			"url", rawURL,
+			"resp_headers", resp.Header,
+			"snippet", string(snippet),
+		)
 		return nil, resp.StatusCode, nil
 	}
 
