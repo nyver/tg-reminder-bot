@@ -70,7 +70,7 @@ func main() {
 			Timeout: cfg.Providers.TV.Timeout,
 		}, log))
 	}
-	registry.RegisterMetric(price.New(cfg.Providers.Price.UserAgent, cfg.Providers.Price.Timeout, cfg.Providers.Price.Headless, log))
+	registry.RegisterMetric(price.New(cfg.Providers.Price.UserAgent, cfg.Providers.Price.Timeout, cfg.Providers.Price.Headless, cfg.Providers.Price.ProxyURL, log))
 
 	airP := travel.NewAirProvider(cfg.Providers.Travel.AirAPIKey, log)
 	railP := travel.NewRailProvider(cfg.Providers.Travel.RailAPIKey, log)

@@ -57,7 +57,7 @@ func main() {
 	}
 	parser := nlu.NewChain(0.85, fastPath, llmParser)
 
-	priceProber := price.New(cfg.Providers.Price.UserAgent, cfg.Providers.Price.Timeout, cfg.Providers.Price.Headless, log)
+	priceProber := price.New(cfg.Providers.Price.UserAgent, cfg.Providers.Price.Timeout, cfg.Providers.Price.Headless, cfg.Providers.Price.ProxyURL, log)
 	defer priceProber.Close()
 	tvScheduler := iptvx.NewScheduler(postgres.NewEPGRepo(db))
 

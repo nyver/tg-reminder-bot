@@ -17,13 +17,23 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     mkdir -p /data-init; \
     touch /data-init/.keep
 
-# debian-slim instead of distroless: required for Chromium (headless price scraping).
-# Set price.headless: false in config.yaml to keep the lightweight behaviour.
+# debian-slim + official Google Chrome: required for headless price scraping.
+# Debian-packaged Chromium has a different BoringSSL/h2 fingerprint that
+# Qrator WAF detects as a bot. Official Chrome ships the same BoringSSL as
+# the real browser, so its TLS/h2 fingerprint passes WAF inspection.
+# Set price.headless: false in config.yaml to skip Chrome entirely.
 FROM debian:bookworm-slim AS runtime
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-        chromium \
-        ca-certificates \
+    && apt-get install -y --no-install-recommends ca-certificates curl gnupg \
+    && curl -fsSL https://dl.google.com/linux/linux_signing_key.pub \
+        | gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg \
+    && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] \
+        http://dl.google.com/linux/chrome/deb/ stable main" \
+        > /etc/apt/sources.list.d/google-chrome.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends google-chrome-stable \
+    && apt-get purge -y curl gnupg \
+    && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --system --gid 65532 nonroot \
     && useradd  --system --uid 65532 --gid nonroot --no-create-home nonroot

@@ -43,6 +43,7 @@ type Provider struct {
 	userAgent  string
 	timeout    time.Duration
 	headless   bool
+	proxyURL   string
 	log        *slog.Logger
 
 	// Headless browser resources. Lazily initialized on first headless request.
@@ -51,7 +52,7 @@ type Provider struct {
 	allocCancel context.CancelFunc
 }
 
-func New(userAgent string, timeout time.Duration, headless bool, log *slog.Logger) *Provider {
+func New(userAgent string, timeout time.Duration, headless bool, proxyURL string, log *slog.Logger) *Provider {
 	if timeout <= 0 {
 		timeout = 15 * time.Second
 	}
@@ -66,11 +67,15 @@ func New(userAgent string, timeout time.Duration, headless bool, log *slog.Logge
 	if headless {
 		log.Info("price: headless mode enabled — Chromium required in runtime")
 	}
+	if proxyURL != "" {
+		log.Info("price: proxy configured", "proxy_url", proxyURL)
+	}
 	return &Provider{
 		httpClient: &http.Client{Timeout: timeout, Jar: jar, Transport: transport},
 		userAgent:  userAgent,
 		timeout:    timeout,
 		headless:   headless,
+		proxyURL:   proxyURL,
 		log:        log,
 	}
 }
@@ -85,11 +90,10 @@ func (p *Provider) Close() {
 // chromeDataDir is the fixed user-data-dir for the headless Chrome process.
 const chromeDataDir = "/tmp/chromium-data"
 
-// chromeBin is the actual Chromium binary on Debian (not the wrapper script).
-// The wrapper /usr/bin/chromium appends --user-data-dir=${HOME}/.config/chromium
-// after our flags, overriding our value and causing crashpad to receive an
-// empty --database path. Calling the binary directly avoids this.
-const chromeBin = "/usr/lib/chromium/chromium"
+// chromeBin is the official Google Chrome binary (not the wrapper script).
+// Using the binary directly avoids the wrapper prepending extra flags that
+// would override our --user-data-dir and break crashpad's --database path.
+const chromeBin = "/opt/google/chrome/chrome"
 
 // initAlloc lazily starts the Chromium exec allocator (shared Chrome process).
 func (p *Provider) initAlloc() {
@@ -115,6 +119,9 @@ func (p *Provider) initAlloc() {
 			// any remaining HOME-relative paths to a writable location.
 			chromedp.Env("HOME=/tmp"),
 		)
+		if p.proxyURL != "" {
+			opts = append(opts, chromedp.ProxyServer(p.proxyURL))
+		}
 		p.allocCtx, p.allocCancel = chromedp.NewExecAllocator(context.Background(), opts...)
 		p.log.Info("price: headless chrome allocator ready")
 	})

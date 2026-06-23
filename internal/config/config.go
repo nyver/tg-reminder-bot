@@ -71,6 +71,7 @@ type PriceConfig struct {
 	UserAgent string        `yaml:"user_agent"`
 	Timeout   time.Duration `yaml:"timeout"`
 	Headless  bool          `yaml:"headless"`
+	ProxyURL  string        `yaml:"proxy_url"`
 }
 
 type TravelConfig struct {
