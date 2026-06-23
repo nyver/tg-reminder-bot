@@ -535,7 +535,7 @@ func (h *Handler) askConfirmation(ctx context.Context, c tele.Context, userID in
 			menu.Data("✏️ Исправить", "confirm_no"),
 		),
 	)
-	return c.Send(confirmMsg, menu, tele.ModeMarkdown)
+	return c.Send(confirmMsg, menu, tele.ModeMarkdownV2)
 }
 
 // formatConfirmSpec builds the human-readable spec block for the confirmation
@@ -578,8 +578,7 @@ func (h *Handler) formatConfirmSpec(ctx context.Context, result *nlu.ParseResult
 	sb.WriteString(fmt.Sprintf("💰 Текущая цена: *%s*\n", formatPriceRub(m.Value, m.Currency)))
 	sb.WriteString("📉 Уведомить при снижении цены\n")
 	if u := spec.Event.Params["url"]; u != "" {
-		// URL is not escaped: '-' and '.' are not special chars in ModeMarkdown.
-		sb.WriteString("🔗 " + u + "\n")
+		sb.WriteString("🔗 " + escapeMarkdown(u) + "\n")
 	}
 	return sb.String()
 }
@@ -954,8 +953,7 @@ func formatSpec(spec *domain.Spec) string {
 		}
 	case domain.TriggerThreshold:
 		if u := spec.Event.Params["url"]; u != "" {
-			// URL is not escaped: '-' and '.' are not special chars in ModeMarkdown.
-			sb.WriteString("🔗 " + u + "\n")
+			sb.WriteString("🔗 " + escapeMarkdown(u) + "\n")
 		}
 		sb.WriteString("📉 Уведомить при снижении цены\n")
 	case domain.TriggerDigest:
