@@ -41,6 +41,7 @@ func main() {
 
 	userRepo := postgres.NewUserRepo(db)
 	reminderRepo := postgres.NewReminderRepo(db)
+	observationRepo := postgres.NewObservationRepo(db)
 	dialogRepo := postgres.NewDialogRepo(db)
 
 	loc, _ := time.LoadLocation("Europe/Moscow")
@@ -67,6 +68,7 @@ func main() {
 		dialogRepo,
 		parser,
 		priceProber,
+		observationRepo,
 		tvScheduler,
 		cfg.Providers.Price.PollCron,
 		log,

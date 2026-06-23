@@ -9,6 +9,7 @@ import (
 
 type reminderRepository interface {
 	Create(ctx context.Context, rem *domain.Reminder) error
+	Get(ctx context.Context, id uuid.UUID) (*domain.Reminder, error)
 	ListByUser(ctx context.Context, userID int64) ([]domain.Reminder, error)
 	Cancel(ctx context.Context, userID int64, id uuid.UUID) error
 	Remove(ctx context.Context, userID int64, id uuid.UUID) error
@@ -25,6 +26,18 @@ type simpleReminderService struct {
 
 func (s *simpleReminderService) Create(ctx context.Context, rem *domain.Reminder) error {
 	return s.repo.Create(ctx, rem)
+}
+
+func (s *simpleReminderService) Get(ctx context.Context, userID int64, id uuid.UUID) (*domain.Reminder, error) {
+	rem, err := s.repo.Get(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	// Scope to owner — hide existence from other users.
+	if rem.UserID != userID {
+		return nil, domain.ErrNotFound
+	}
+	return rem, nil
 }
 
 func (s *simpleReminderService) ListByUser(ctx context.Context, userID int64) ([]domain.Reminder, error) {

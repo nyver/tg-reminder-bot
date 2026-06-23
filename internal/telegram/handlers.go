@@ -23,10 +23,16 @@ import (
 // ReminderService manages reminder lifecycle.
 type ReminderService interface {
 	Create(ctx context.Context, rem *domain.Reminder) error
+	Get(ctx context.Context, userID int64, id uuid.UUID) (*domain.Reminder, error)
 	ListByUser(ctx context.Context, userID int64) ([]domain.Reminder, error)
 	Cancel(ctx context.Context, userID int64, id uuid.UUID) error
 	Remove(ctx context.Context, userID int64, id uuid.UUID) error
 	Pause(ctx context.Context, userID int64, id uuid.UUID, pause bool) error
+}
+
+// PriceHistory returns the last price observation for a reminder.
+type PriceHistory interface {
+	Last(ctx context.Context, reminderID uuid.UUID) (*domain.Observation, error)
 }
 
 // UserService manages users.
@@ -42,14 +48,15 @@ type PriceProber interface {
 }
 
 type Handler struct {
-	reminders           ReminderService
-	users               UserService
-	dialogs             DialogStore
-	parser              nlu.Parser
-	prices              PriceProber          // optional
-	schedule            provider.TVScheduler // optional
-	priceDefaultPollCron string              // default cron when user omits interval
-	log                 *slog.Logger
+	reminders            ReminderService
+	users                UserService
+	dialogs              DialogStore
+	parser               nlu.Parser
+	prices               PriceProber          // optional
+	history              PriceHistory         // optional, for /refresh delta
+	schedule             provider.TVScheduler // optional
+	priceDefaultPollCron string
+	log                  *slog.Logger
 }
 
 func NewHandler(
@@ -58,6 +65,7 @@ func NewHandler(
 	dialogs DialogStore,
 	parser nlu.Parser,
 	prices PriceProber,
+	history PriceHistory,
 	schedule provider.TVScheduler,
 	priceDefaultPollCron string,
 	log *slog.Logger,
@@ -68,6 +76,7 @@ func NewHandler(
 		dialogs:              dialogs,
 		parser:               parser,
 		prices:               prices,
+		history:              history,
 		schedule:             schedule,
 		priceDefaultPollCron: priceDefaultPollCron,
 		log:                  log,
@@ -82,6 +91,7 @@ func (h *Handler) RegisterRoutes(bot *tele.Bot) {
 	bot.Handle("/remove", h.handleRemove)
 	bot.Handle("/pause", h.handlePause)
 	bot.Handle("/resume", h.handleResume)
+	bot.Handle("/refresh", h.handleRefresh)
 	bot.Handle("/tz", h.handleTZ)
 	bot.Handle("/tv", h.handleTV)
 	bot.Handle(tele.OnText, h.handleText)
@@ -113,8 +123,12 @@ func (h *Handler) handleList(c tele.Context) error {
 	var sb strings.Builder
 	sb.WriteString("*Ваши напоминания:*\n\n")
 	for i, r := range rems {
-		sb.WriteString(fmt.Sprintf("%d\\. %s \\[%s\\]\n`/cancel %s`\n`/remove %s`\n\n",
+		sb.WriteString(fmt.Sprintf("%d\\. %s \\[%s\\]\n`/cancel %s`\n`/remove %s`\n",
 			i+1, escapeMarkdown(r.RawText), string(r.Status), r.ID.String(), r.ID.String()))
+		if r.Spec.Trigger == domain.TriggerThreshold && r.Spec.Event.Type == "price" {
+			sb.WriteString(fmt.Sprintf("`/refresh %s`\n", r.ID.String()))
+		}
+		sb.WriteByte('\n')
 	}
 	return c.Send(sb.String(), tele.ModeMarkdownV2)
 }
@@ -149,6 +163,80 @@ func (h *Handler) handleRemove(c tele.Context) error {
 		return c.Send("Напоминание не найдено.")
 	}
 	return c.Send("✅ Напоминание удалено без возможности восстановления.")
+}
+
+func (h *Handler) handleRefresh(c tele.Context) error {
+	ctx := context.Background()
+	args := strings.TrimSpace(c.Message().Payload)
+	if args == "" {
+		return c.Send("Укажите ID напоминания: `/refresh <id>`", tele.ModeMarkdown)
+	}
+	id, err := uuid.Parse(args)
+	if err != nil {
+		return c.Send("Неверный ID напоминания.")
+	}
+
+	rem, err := h.reminders.Get(ctx, c.Sender().ID, id)
+	if err != nil {
+		return c.Send("Напоминание не найдено.")
+	}
+	if rem.Spec.Trigger != domain.TriggerThreshold || rem.Spec.Event.Type != "price" {
+		return c.Send("Команда `/refresh` доступна только для напоминаний о снижении цены.", tele.ModeMarkdown)
+	}
+	if h.prices == nil {
+		return c.Send("Провайдер цен недоступен.")
+	}
+
+	_ = c.Bot().Notify(c.Sender(), tele.Typing)
+
+	sampleCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	m, err := h.prices.Sample(sampleCtx, provider.Query{
+		Title:  rem.Spec.Event.Title,
+		Params: rem.Spec.Event.Params,
+	})
+	if err != nil || !m.Available || m.Value <= 0 {
+		var sb strings.Builder
+		sb.WriteString("⚠️ Не удалось получить текущую цену\n")
+		if u := rem.Spec.Event.Params["url"]; u != "" {
+			sb.WriteString(u + "\n")
+		}
+		if m.HTTPStatus > 0 {
+			sb.WriteString(fmt.Sprintf("\nHTTP статус: *%d*", m.HTTPStatus))
+		}
+		return c.Send(sb.String(), tele.ModeMarkdown)
+	}
+
+	title := rem.Spec.Event.Title
+	if title == "" {
+		title = m.Title
+	}
+
+	var sb strings.Builder
+	if title != "" {
+		sb.WriteString("📌 *" + escapeMarkdown(title) + "*\n")
+	}
+	sb.WriteString(fmt.Sprintf("💰 Текущая цена: *%s*\n", formatPriceRub(m.Value, m.Currency)))
+
+	if h.history != nil {
+		if prev, hErr := h.history.Last(ctx, rem.ID); hErr == nil && prev != nil && prev.Value > 0 {
+			diff := prev.Value - m.Value
+			switch {
+			case diff > 0:
+				sb.WriteString(fmt.Sprintf("📉 Снизилась на *%s* с прошлой проверки\n", formatPriceRub(diff, m.Currency)))
+			case diff < 0:
+				sb.WriteString(fmt.Sprintf("📈 Выросла на *%s* с прошлой проверки\n", formatPriceRub(-diff, m.Currency)))
+			default:
+				sb.WriteString("➡️ Не изменилась с прошлой проверки\n")
+			}
+		}
+	}
+
+	if u := rem.Spec.Event.Params["url"]; u != "" {
+		sb.WriteString("🔗 " + escapeMarkdown(u))
+	}
+	return c.Send(sb.String(), tele.ModeMarkdown)
 }
 
 func (h *Handler) handlePause(c tele.Context) error {
@@ -1086,6 +1174,7 @@ const msgHelp = `*Команды:*
 /remove <id> — удалить напоминание без возможности восстановления
 /pause <id> — приостановить
 /resume <id> — возобновить
+/refresh <id> — запросить текущую цену прямо сейчас
 /tz <зона> — установить часовой пояс (например, Europe/Moscow)
 /tv <программа> — расписание на ближайшую неделю
 /tv <программа> | <канал> — расписание на конкретном канале
@@ -1099,4 +1188,5 @@ const msgHelp = `*Команды:*
 • «уведоми за 3 часа до КВН на Первом»
 • «уведоми за 1 неделю до КВН на Первом»
 • «вот ссылка на товар — уведоми при снижении цены»
+• «вот ссылка — уведоми при снижении цены каждые 4 часа»
 • «каждый день в 9:00 — 5 дешёвых билетов СПб→Калининград на месяц вперёд»`
