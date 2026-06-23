@@ -229,21 +229,25 @@ func (p *Provider) fetchPageHeadless(rawURL string) ([]byte, error) {
 		chromedp.Navigate(rawURL),
 		chromedp.WaitReady("body", chromedp.ByQuery),
 		chromedp.Poll(`document.readyState === "complete"`, nil),
-		// Handle WAF JS challenges (Qrator, Cloudflare, etc.).
+		// Handle WAF JS challenges (Qrator, Cloudflare, ServicePipe, etc.).
 		// The challenge page runs JS, sets a validation cookie, then redirects
 		// back to the original URL. We detect the challenge and wait for the
 		// redirect + real page load before extracting HTML.
 		chromedp.ActionFunc(func(ctx context.Context) error {
 			var isChallenge bool
 			if err := chromedp.Evaluate(
-				`!!document.querySelector('script[src*="__qrator"], #cf-challenge-running, .cf-browser-verification')`,
+				`!!document.querySelector('script[src*="__qrator"], #cf-challenge-running, .cf-browser-verification') `+
+					`|| document.body.innerHTML.includes('servicepipe.ru') `+
+					`|| (document.title === '' && document.body.innerHTML.length < 10000)`,
 				&isChallenge,
 			).Do(ctx); err != nil || !isChallenge {
 				return nil // not a challenge page, continue
 			}
-			// Poll until the challenge redirects and the real page is loaded.
+			// Poll until the challenge resolves and the real page is ready.
 			return chromedp.Poll(
 				`!document.querySelector('script[src*="__qrator"], #cf-challenge-running, .cf-browser-verification') `+
+					`&& !document.body.innerHTML.includes('servicepipe.ru') `+
+					`&& document.title !== '' `+
 					`&& document.readyState === "complete"`,
 				nil,
 			).Do(ctx)
