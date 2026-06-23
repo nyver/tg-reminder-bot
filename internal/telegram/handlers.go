@@ -120,15 +120,32 @@ func (h *Handler) handleList(c tele.Context) error {
 	if len(rems) == 0 {
 		return c.Send("У вас нет активных напоминаний.")
 	}
+
+	loc, _ := time.LoadLocation("Europe/Moscow")
+	if u, err := h.users.GetOrCreate(ctx, c.Sender().ID); err == nil && u.TZ != "" {
+		if l, err := time.LoadLocation(u.TZ); err == nil {
+			loc = l
+		}
+	}
+
 	var sb strings.Builder
 	sb.WriteString("*Ваши напоминания:*\n\n")
 	for i, r := range rems {
-		sb.WriteString(fmt.Sprintf("%d\\. %s \\[%s\\]\n`/cancel %s`\n`/remove %s`\n",
-			i+1, escapeMarkdown(r.RawText), string(r.Status), r.ID.String(), r.ID.String()))
+		sb.WriteString(fmt.Sprintf("%d\\. %s \\[%s\\]\n",
+			i+1, escapeMarkdown(r.RawText), string(r.Status)))
 		if r.Spec.Trigger == domain.TriggerThreshold && r.Spec.Event.Type == "price" {
+			if h.history != nil {
+				if obs, err := h.history.Last(ctx, r.ID); err == nil && obs != nil && obs.Value > 0 {
+					at := obs.ObservedAt.In(loc).Format("02.01 15:04")
+					sb.WriteString(fmt.Sprintf("💰 Последняя цена: *%s* \\(%s\\)\n",
+						escapeMarkdown(formatPriceRub(obs.Value, obs.Currency)),
+						escapeMarkdown(at),
+					))
+				}
+			}
 			sb.WriteString(fmt.Sprintf("`/refresh %s`\n", r.ID.String()))
 		}
-		sb.WriteByte('\n')
+		sb.WriteString(fmt.Sprintf("`/cancel %s`\n`/remove %s`\n\n", r.ID.String(), r.ID.String()))
 	}
 	return c.Send(sb.String(), tele.ModeMarkdownV2)
 }
