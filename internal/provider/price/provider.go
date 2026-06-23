@@ -21,6 +21,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/chromedp/cdproto/emulation"
+	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/chromedp"
 	"github.com/nyver2k/remindertgbot/internal/provider"
@@ -118,6 +120,20 @@ func (p *Provider) initAlloc() {
 	})
 }
 
+// stealthScript patches known Chromium automation fingerprints before any page
+// script runs. Covers: webdriver flag, chrome.runtime, plugins, languages,
+// permissions API — all common signals used by Qrator/Cloudflare bot detection.
+const stealthScript = `(function(){
+  Object.defineProperty(navigator,'webdriver',{get:()=>undefined});
+  if(!window.chrome){window.chrome={runtime:{},loadTimes:function(){},csi:function(){},app:{}};}
+  Object.defineProperty(navigator,'plugins',{get:()=>{const a=[1,2,3,4,5];a.item=i=>a[i];a.namedItem=()=>null;a.refresh=()=>{};return a;}});
+  Object.defineProperty(navigator,'languages',{get:()=>['ru-RU','ru','en-US','en']});
+  if(navigator.permissions&&navigator.permissions.query){
+    const orig=navigator.permissions.query.bind(navigator.permissions);
+    navigator.permissions.query=p=>p.name==='notifications'?Promise.resolve({state:'denied',onchange:null}):orig(p);
+  }
+})();`
+
 // fetchPageHeadless opens a new browser tab, navigates to rawURL, and returns
 // the full page HTML. The Chrome process is shared across calls (started once).
 func (p *Provider) fetchPageHeadless(rawURL string) ([]byte, error) {
@@ -134,13 +150,45 @@ func (p *Provider) fetchPageHeadless(rawURL string) ([]byte, error) {
 
 	p.log.Debug("price: headless fetch", "url", rawURL)
 
+	// Capture real HTTP request/response headers via CDP Network domain.
+	chromedp.ListenTarget(tabCtx, func(ev interface{}) {
+		switch e := ev.(type) {
+		case *network.EventRequestWillBeSent:
+			if e.Type == network.ResourceTypeDocument {
+				p.log.Debug("price: headless request",
+					"url", e.Request.URL,
+					"method", e.Request.Method,
+					"req_headers", e.Request.Headers,
+				)
+			}
+		case *network.EventResponseReceived:
+			if e.Type == network.ResourceTypeDocument {
+				p.log.Debug("price: headless response headers",
+					"url", e.Response.URL,
+					"status", e.Response.Status,
+					"resp_headers", e.Response.Headers,
+				)
+			}
+		}
+	})
+
 	var html string
 	if err := chromedp.Run(tabCtx,
-		// Patch navigator.webdriver before any page script runs.
+		// Enable CDP Network domain so events above are delivered.
 		chromedp.ActionFunc(func(ctx context.Context) error {
-			_, err := page.AddScriptToEvaluateOnNewDocument(
-				`Object.defineProperty(navigator,'webdriver',{get:()=>undefined});`,
-			).Do(ctx)
+			return network.Enable().Do(ctx)
+		}),
+		// Override UA at the CDP level: fixes the Linux-platform vs Windows-UA
+		// mismatch that many WAFs detect via Client Hints headers.
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			return emulation.SetUserAgentOverride(p.userAgent).
+				WithAcceptLanguage("ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7").
+				WithPlatform("Win32").
+				Do(ctx)
+		}),
+		// Inject stealth patches before any page script runs.
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			_, err := page.AddScriptToEvaluateOnNewDocument(stealthScript).Do(ctx)
 			return err
 		}),
 		chromedp.Navigate(rawURL),
@@ -171,10 +219,17 @@ func (p *Provider) fetchPageHeadless(rawURL string) ([]byte, error) {
 	); err != nil {
 		return nil, fmt.Errorf("headless fetch: %w", err)
 	}
-	p.log.Debug("price: headless response",
+
+	const bodySnippetLen = 512
+	snippet := html
+	if len(snippet) > bodySnippetLen {
+		snippet = snippet[:bodySnippetLen]
+	}
+	p.log.Debug("price: headless page loaded",
 		"url", rawURL,
 		"page_title", extractPageTitle([]byte(html)),
 		"html_len", len(html),
+		"html_snippet", snippet,
 	)
 	return []byte(html), nil
 }
