@@ -178,12 +178,30 @@ func (p *Provider) fetchPageHeadless(rawURL string) ([]byte, error) {
 		chromedp.ActionFunc(func(ctx context.Context) error {
 			return network.Enable().Do(ctx)
 		}),
-		// Override UA at the CDP level: fixes the Linux-platform vs Windows-UA
-		// mismatch that many WAFs detect via Client Hints headers.
+		// Override UA + Client Hints at the CDP level.
+		// WithUserAgentMetadata is required: without it Chrome omits Sec-CH-UA*
+		// headers entirely, which is the primary signal Qrator uses to block bots.
 		chromedp.ActionFunc(func(ctx context.Context) error {
 			return emulation.SetUserAgentOverride(p.userAgent).
 				WithAcceptLanguage("ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7").
 				WithPlatform("Win32").
+				WithUserAgentMetadata(&emulation.UserAgentMetadata{
+					Platform:        "Windows",
+					PlatformVersion: "10.0.0",
+					Architecture:    "x86",
+					Bitness:         "64",
+					Mobile:          false,
+					Brands: []*emulation.UserAgentBrandVersion{
+						{Brand: "Google Chrome", Version: "125"},
+						{Brand: "Chromium", Version: "125"},
+						{Brand: "Not.A/Brand", Version: "24"},
+					},
+					FullVersionList: []*emulation.UserAgentBrandVersion{
+						{Brand: "Google Chrome", Version: "125.0.6422.112"},
+						{Brand: "Chromium", Version: "125.0.6422.112"},
+						{Brand: "Not.A/Brand", Version: "24.0.0.0"},
+					},
+				}).
 				Do(ctx)
 		}),
 		// Inject stealth patches before any page script runs.
