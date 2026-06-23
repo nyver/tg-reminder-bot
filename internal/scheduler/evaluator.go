@@ -221,6 +221,7 @@ func (e *Evaluator) evaluateThreshold(ctx context.Context, r domain.Reminder) ([
 		Value:      m.Value,
 		Currency:   m.Currency,
 		Available:  m.Available,
+		Title:      m.Title,
 		ObservedAt: now,
 	}
 	_ = e.history.Save(ctx, obs)

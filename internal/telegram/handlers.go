@@ -134,17 +134,25 @@ func (h *Handler) handleList(c tele.Context) error {
 		sb.WriteString(fmt.Sprintf("%d\\. %s \\[%s\\]\n",
 			i+1, escapeMarkdown(r.RawText), string(r.Status)))
 		if r.Spec.Trigger == domain.TriggerThreshold && r.Spec.Event.Type == "price" {
-			if title := r.Spec.Event.Title; title != "" {
-				sb.WriteString("📌 " + escapeMarkdown(title) + "\n")
-			}
 			if h.history != nil {
 				if obs, err := h.history.Last(ctx, r.ID); err == nil && obs != nil && obs.Value > 0 {
+					title := obs.Title
+					if title == "" {
+						title = r.Spec.Event.Title
+					}
+					if title != "" {
+						sb.WriteString("📌 " + escapeMarkdown(title) + "\n")
+					}
 					at := obs.ObservedAt.In(loc).Format("02.01 15:04")
 					sb.WriteString(fmt.Sprintf("💰 Последняя цена: *%s* \\(%s\\)\n",
 						escapeMarkdown(formatPriceRub(obs.Value, obs.Currency)),
 						escapeMarkdown(at),
 					))
+				} else if title := r.Spec.Event.Title; title != "" {
+					sb.WriteString("📌 " + escapeMarkdown(title) + "\n")
 				}
+			} else if title := r.Spec.Event.Title; title != "" {
+				sb.WriteString("📌 " + escapeMarkdown(title) + "\n")
 			}
 			sb.WriteString(fmt.Sprintf("`/refresh %s`\n", r.ID.String()))
 		}

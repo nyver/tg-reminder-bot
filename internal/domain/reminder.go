@@ -99,6 +99,7 @@ type Observation struct {
 	Value      int64
 	Currency   string
 	Available  bool
+	Title      string
 	Raw        json.RawMessage
 	ObservedAt time.Time
 }

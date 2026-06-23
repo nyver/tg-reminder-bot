@@ -27,16 +27,16 @@ func (r *ObservationRepo) Save(ctx context.Context, obs *domain.Observation) err
 		raw = json.RawMessage("null")
 	}
 	_, err := r.db.ExecContext(ctx, r.db.Rebind(`
-		INSERT INTO observations (id, reminder_id, value, currency, available, raw, observed_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7)`),
+		INSERT INTO observations (id, reminder_id, value, currency, available, title, raw, observed_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`),
 		obs.ID.String(), obs.ReminderID.String(),
-		obs.Value, obs.Currency, obs.Available, string(raw), obs.ObservedAt)
+		obs.Value, obs.Currency, obs.Available, obs.Title, string(raw), obs.ObservedAt)
 	return err
 }
 
 func (r *ObservationRepo) Last(ctx context.Context, reminderID uuid.UUID) (*domain.Observation, error) {
 	row := r.db.QueryRowContext(ctx, r.db.Rebind(`
-		SELECT id, reminder_id, value, currency, available, raw, observed_at
+		SELECT id, reminder_id, value, currency, available, title, raw, observed_at
 		FROM observations
 		WHERE reminder_id=$1
 		ORDER BY observed_at DESC
@@ -51,7 +51,7 @@ func (r *ObservationRepo) Last(ctx context.Context, reminderID uuid.UUID) (*doma
 
 func (r *ObservationRepo) List(ctx context.Context, reminderID uuid.UUID, limit int) ([]domain.Observation, error) {
 	rows, err := r.db.QueryContext(ctx, r.db.Rebind(`
-		SELECT id, reminder_id, value, currency, available, raw, observed_at
+		SELECT id, reminder_id, value, currency, available, title, raw, observed_at
 		FROM observations WHERE reminder_id=$1
 		ORDER BY observed_at DESC LIMIT $2`), reminderID.String(), limit)
 	if err != nil {
@@ -75,7 +75,7 @@ func scanObservation(row rowScanner) (*domain.Observation, error) {
 	var rawStr string
 	if err := row.Scan(
 		&idStr, &remIDStr, &obs.Value, &obs.Currency,
-		&obs.Available, &rawStr, &obs.ObservedAt,
+		&obs.Available, &obs.Title, &rawStr, &obs.ObservedAt,
 	); err != nil {
 		return nil, err
 	}
