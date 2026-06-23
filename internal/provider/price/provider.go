@@ -107,7 +107,12 @@ func (p *Provider) initAlloc() {
 			chromedp.ExecPath(chromeBin),
 			chromedp.NoSandbox,
 			chromedp.Flag("disable-dev-shm-usage", true),
-			chromedp.Flag("disable-gpu", true),
+			// Do NOT set --disable-gpu: it strips Canvas/WebGL support which
+			// ServicePipe and similar WAFs use for browser fingerprinting.
+			// SwiftShader provides software-based OpenGL/WebGL without a real
+			// GPU and is bundled with Chrome 80+.
+			chromedp.Flag("use-angle", "swiftshader"),
+			chromedp.Flag("use-gl", "angle"),
 			chromedp.Flag("no-zygote", true),
 			chromedp.Flag("user-data-dir", chromeDataDir),
 			// Disable automation markers so JS-based WAFs cannot distinguish
