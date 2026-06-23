@@ -134,6 +134,9 @@ func (h *Handler) handleList(c tele.Context) error {
 		sb.WriteString(fmt.Sprintf("%d\\. %s \\[%s\\]\n",
 			i+1, escapeMarkdown(r.RawText), string(r.Status)))
 		if r.Spec.Trigger == domain.TriggerThreshold && r.Spec.Event.Type == "price" {
+			if title := r.Spec.Event.Title; title != "" {
+				sb.WriteString("📌 " + escapeMarkdown(title) + "\n")
+			}
 			if h.history != nil {
 				if obs, err := h.history.Last(ctx, r.ID); err == nil && obs != nil && obs.Value > 0 {
 					at := obs.ObservedAt.In(loc).Format("02.01 15:04")
@@ -799,7 +802,7 @@ func formatPriceRub(kopecks int64, currency string) string {
 	var result []byte
 	for i, c := range []byte(s) {
 		if i > 0 && (len(s)-i)%3 == 0 {
-			result = append(result, ' ') // non-breaking space
+			result = append(result, ' ')
 		}
 		result = append(result, c)
 	}
