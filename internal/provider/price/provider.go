@@ -178,12 +178,9 @@ func (p *Provider) fetchPageHeadless(rawURL string) ([]byte, error) {
 		chromedp.ActionFunc(func(ctx context.Context) error {
 			return network.Enable().Do(ctx)
 		}),
-		// Override UA + Client Hints at the CDP level.
-		// WithUserAgentMetadata is required: without it Chrome omits Sec-CH-UA*
-		// headers entirely, which is the primary signal Qrator uses to block bots.
+		// Override UA + navigator.platform at the CDP emulation level.
 		chromedp.ActionFunc(func(ctx context.Context) error {
 			return emulation.SetUserAgentOverride(p.userAgent).
-				WithAcceptLanguage("ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7").
 				WithPlatform("Win32").
 				WithUserAgentMetadata(&emulation.UserAgentMetadata{
 					Platform:        "Windows",
@@ -203,6 +200,19 @@ func (p *Provider) fetchPageHeadless(rawURL string) ([]byte, error) {
 					},
 				}).
 				Do(ctx)
+		}),
+		// Force-inject Sec-CH-UA Client Hints and other headers that emulation
+		// SetUserAgentOverride / UserAgentMetadata fails to propagate in headless
+		// Chromium on Debian. Without Sec-CH-UA*, Qrator blocks the request
+		// immediately as a non-browser client.
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			return network.SetExtraHTTPHeaders(network.Headers{
+				"Accept":             "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+				"Accept-Language":    "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+				"sec-ch-ua":          `"Google Chrome";v="125", "Chromium";v="125", "Not.A/Brand";v="24"`,
+				"sec-ch-ua-mobile":   "?0",
+				"sec-ch-ua-platform": `"Windows"`,
+			}).Do(ctx)
 		}),
 		// Inject stealth patches before any page script runs.
 		chromedp.ActionFunc(func(ctx context.Context) error {
