@@ -152,7 +152,14 @@ func (p *Provider) fetchPageHeadless(rawURL string) ([]byte, error) {
 	)
 	defer cancel()
 
-	tabCtx, timeoutCancel := context.WithTimeout(tabCtx, p.timeout)
+	// Headless mode needs extra time for WAF JS challenges (ServicePipe,
+	// Cloudflare, Qrator). Use at least 30s regardless of the configured
+	// HTTP timeout so challenge redirects have room to complete.
+	headlessTimeout := p.timeout
+	if headlessTimeout < 30*time.Second {
+		headlessTimeout = 30 * time.Second
+	}
+	tabCtx, timeoutCancel := context.WithTimeout(tabCtx, headlessTimeout)
 	defer timeoutCancel()
 
 	p.log.Debug("price: headless fetch", "url", rawURL)
@@ -180,6 +187,7 @@ func (p *Provider) fetchPageHeadless(rawURL string) ([]byte, error) {
 	})
 
 	var html string
+	var resolvedChallenge bool
 	if err := chromedp.Run(tabCtx,
 		// Enable CDP Network domain so events above are delivered.
 		chromedp.ActionFunc(func(ctx context.Context) error {
@@ -233,6 +241,8 @@ func (p *Provider) fetchPageHeadless(rawURL string) ([]byte, error) {
 		// The challenge page runs JS, sets a validation cookie, then redirects
 		// back to the original URL. We detect the challenge and wait for the
 		// redirect + real page load before extracting HTML.
+		// resolvedChallenge is set to true when we actually waited for one so
+		// the subsequent XHR sleep can be skipped (time already spent).
 		chromedp.ActionFunc(func(ctx context.Context) error {
 			var isChallenge bool
 			if err := chromedp.Evaluate(
@@ -243,17 +253,39 @@ func (p *Provider) fetchPageHeadless(rawURL string) ([]byte, error) {
 			).Do(ctx); err != nil || !isChallenge {
 				return nil // not a challenge page, continue
 			}
-			// Poll until the challenge resolves and the real page is ready.
-			return chromedp.Poll(
+			resolvedChallenge = true
+			// Use a sub-context so the poll can time out without failing the whole
+			// fetch — if the challenge doesn't resolve we proceed with whatever HTML
+			// the tab currently holds (may yield no price, retried next tick).
+			// Leave 3s for post-challenge HTML extraction.
+			budget := 3 * time.Second
+			if deadline, ok := ctx.Deadline(); ok {
+				if rem := time.Until(deadline) - 3*time.Second; rem > budget {
+					budget = rem
+				}
+			}
+			challengeCtx, cancel := context.WithTimeout(ctx, budget)
+			defer cancel()
+			err := chromedp.Poll(
 				`!document.querySelector('script[src*="__qrator"], #cf-challenge-running, .cf-browser-verification') `+
 					`&& !document.body.innerHTML.includes('servicepipe.ru') `+
 					`&& document.title !== '' `+
 					`&& document.readyState === "complete"`,
 				nil,
-			).Do(ctx)
+			).Do(challengeCtx)
+			if err != nil && challengeCtx.Err() != nil {
+				return nil // challenge timed out gracefully
+			}
+			return err
 		}),
-		// Extra wait for XHR-rendered price widgets after full page load.
-		chromedp.Sleep(2*time.Second),
+		// Extra wait for XHR-rendered price widgets — skip when we already spent
+		// time waiting for a WAF challenge redirect.
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			if resolvedChallenge {
+				return nil
+			}
+			return chromedp.Sleep(2 * time.Second).Do(ctx)
+		}),
 		chromedp.Evaluate(`document.documentElement.outerHTML`, &html),
 	); err != nil {
 		return nil, fmt.Errorf("headless fetch: %w", err)
