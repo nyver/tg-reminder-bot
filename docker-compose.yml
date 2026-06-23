@@ -6,7 +6,7 @@ x-app: &app
     dockerfile: Dockerfile
     args:
       VERSION: ${VERSION:-dev}
-  image: remind:local
+  image: tg-reminder-bot
   environment:
     CONFIG_FILE: /app/config.yaml
     TELEGRAM_TOKEN: ${TELEGRAM_TOKEN:-}
