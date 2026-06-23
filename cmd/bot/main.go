@@ -68,6 +68,7 @@ func main() {
 		parser,
 		priceProber,
 		tvScheduler,
+		cfg.Providers.Price.PollCron,
 		log,
 	)
 

@@ -280,13 +280,12 @@ func (p *Provider) Sample(ctx context.Context, q provider.Query) (provider.Measu
 		return provider.Measurement{}, fmt.Errorf("price provider: %w", err)
 	}
 
-	body, err := p.fetchBody(ctx, rawURL)
+	body, httpStatus, err := p.fetchBody(ctx, rawURL)
 	if err != nil {
-		return provider.Measurement{}, err
+		return provider.Measurement{Available: false, HTTPStatus: httpStatus}, err
 	}
 	if body == nil {
-		// HTTP path returned a non-200 that we treat as "unavailable".
-		return provider.Measurement{Available: false}, nil
+		return provider.Measurement{Available: false, HTTPStatus: httpStatus}, nil
 	}
 
 	kopecks, currency, pageTitle, found := extractPrice(body)
@@ -314,17 +313,19 @@ func (p *Provider) Sample(ctx context.Context, q provider.Query) (provider.Measu
 	}, nil
 }
 
-// fetchBody returns the page HTML. Returns (nil, nil) when the page is
-// temporarily unavailable (401/403/404) so the caller can return Available=false
-// without treating it as an error.
-func (p *Provider) fetchBody(ctx context.Context, rawURL string) ([]byte, error) {
+// fetchBody returns the page HTML and HTTP status.
+// Returns (nil, status, nil) when the server responded with a non-success
+// status that we treat as "temporarily unavailable" (401/403/404).
+// Returns (nil, status, err) for other 4xx/5xx errors.
+func (p *Provider) fetchBody(ctx context.Context, rawURL string) ([]byte, int, error) {
 	if p.headless {
-		return p.fetchPageHeadless(rawURL)
+		body, err := p.fetchPageHeadless(rawURL)
+		return body, 0, err
 	}
 
 	body, status, err := p.fetchPage(ctx, rawURL, "")
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if status == http.StatusUnauthorized || status == http.StatusForbidden {
 		// Pre-warm the session by visiting the site root so the cookie jar
@@ -332,20 +333,20 @@ func (p *Provider) fetchBody(ctx context.Context, rawURL string) ([]byte, error)
 		rootURL := p.warmSession(ctx, rawURL)
 		body, status, err = p.fetchPage(ctx, rawURL, rootURL)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 	}
 	if status == http.StatusNotFound {
-		return nil, nil
+		return nil, status, nil
 	}
 	if status == http.StatusUnauthorized || status == http.StatusForbidden {
 		p.log.Warn("price: access denied, will retry next tick", "url", rawURL, "status", status)
-		return nil, nil
+		return nil, status, nil
 	}
 	if status >= 400 {
-		return nil, fmt.Errorf("price fetch: HTTP %d", status)
+		return nil, status, fmt.Errorf("price fetch: HTTP %d", status)
 	}
-	return body, nil
+	return body, status, nil
 }
 
 // fetchPage performs a browser-like GET and returns (body, statusCode, error).

@@ -198,13 +198,13 @@ func (e *Evaluator) evaluateThreshold(ctx context.Context, r domain.Reminder) ([
 			"provider", r.Spec.Event.Type,
 			"err", err,
 		)
-		return priceUnavailableNotification(r, now), nil
+		return priceUnavailableNotification(r, now, m.HTTPStatus), nil
 	}
 
 	// Value == 0 means the page loaded but price extraction failed (e.g. WAF block).
 	// Treat it the same as unavailable to avoid a false "price dropped to 0" alert.
 	if !m.Available || m.Value <= 0 {
-		return priceUnavailableNotification(r, now), nil
+		return priceUnavailableNotification(r, now, m.HTTPStatus), nil
 	}
 
 	// Read previous observation BEFORE saving so prev is truly the last point,
@@ -352,11 +352,11 @@ func orDefault(v, def int) int {
 	return v
 }
 
-func priceUnavailableNotification(r domain.Reminder, now time.Time) []PlannedNotification {
+func priceUnavailableNotification(r domain.Reminder, now time.Time, httpStatus int) []PlannedNotification {
 	key := userIdemKey(r.UserID, "price_unavailable:"+r.ID.String()+":"+now.In(userTZ(r)).Format("2006-01-02"))
 	return []PlannedNotification{{
 		FireAt:         now,
-		Text:           renderPriceUnavailableText(r.Spec),
+		Text:           renderPriceUnavailableText(r.Spec, httpStatus),
 		IdempotencyKey: key,
 	}}
 }
@@ -401,7 +401,7 @@ func renderTVProgramText(ev provider.Event, loc *time.Location) string {
 	return text
 }
 
-func renderPriceUnavailableText(spec domain.Spec) string {
+func renderPriceUnavailableText(spec domain.Spec, httpStatus int) string {
 	var sb strings.Builder
 	sb.WriteString("⚠️ Не удалось получить текущую цену\n")
 	if spec.Event.Title != "" {
@@ -409,6 +409,9 @@ func renderPriceUnavailableText(spec domain.Spec) string {
 	}
 	if u := spec.Event.Params["url"]; u != "" {
 		sb.WriteString(u + "\n")
+	}
+	if httpStatus > 0 {
+		sb.WriteString(fmt.Sprintf("\nHTTP статус: *%d*\n", httpStatus))
 	}
 	sb.WriteString("\nБот продолжит проверять и уведомит при снижении цены.")
 	return sb.String()

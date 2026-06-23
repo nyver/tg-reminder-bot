@@ -42,13 +42,14 @@ type PriceProber interface {
 }
 
 type Handler struct {
-	reminders ReminderService
-	users     UserService
-	dialogs   DialogStore
-	parser    nlu.Parser
-	prices    PriceProber          // optional
-	schedule  provider.TVScheduler // optional
-	log       *slog.Logger
+	reminders           ReminderService
+	users               UserService
+	dialogs             DialogStore
+	parser              nlu.Parser
+	prices              PriceProber          // optional
+	schedule            provider.TVScheduler // optional
+	priceDefaultPollCron string              // default cron when user omits interval
+	log                 *slog.Logger
 }
 
 func NewHandler(
@@ -58,16 +59,18 @@ func NewHandler(
 	parser nlu.Parser,
 	prices PriceProber,
 	schedule provider.TVScheduler,
+	priceDefaultPollCron string,
 	log *slog.Logger,
 ) *Handler {
 	return &Handler{
-		reminders: reminders,
-		users:     users,
-		dialogs:   dialogs,
-		parser:    parser,
-		prices:    prices,
-		schedule:  schedule,
-		log:       log,
+		reminders:            reminders,
+		users:                users,
+		dialogs:              dialogs,
+		parser:               parser,
+		prices:               prices,
+		schedule:             schedule,
+		priceDefaultPollCron: priceDefaultPollCron,
+		log:                  log,
 	}
 }
 
@@ -512,12 +515,16 @@ func (h *Handler) startParsing(ctx context.Context, c tele.Context, userID int64
 }
 
 func (h *Handler) askConfirmation(ctx context.Context, c tele.Context, userID int64, rawText string, result *nlu.ParseResult) error {
+	evalCron := result.EvalCron
+	if evalCron == "" && result.Spec != nil && result.Spec.Trigger == domain.TriggerThreshold {
+		evalCron = h.priceDefaultPollCron
+	}
 	ctxData := &DialogContext{
 		RawText:    rawText,
 		Kind:       result.Kind,
 		ParsedSpec: mustMarshal(result.Spec),
 		Confidence: result.Confidence,
-		EvalCron:   result.EvalCron,
+		EvalCron:   evalCron,
 		FireAt:     result.FireAt,
 	}
 	ctxJSON, _ := encodeContext(ctxData)
@@ -580,6 +587,9 @@ func (h *Handler) formatConfirmSpec(ctx context.Context, result *nlu.ParseResult
 	if u := spec.Event.Params["url"]; u != "" {
 		sb.WriteString("🔗 " + escapeMarkdown(u) + "\n")
 	}
+	if pollLine := formatFireLine(result); pollLine != "" {
+		sb.WriteString(pollLine)
+	}
 	return sb.String()
 }
 
@@ -618,6 +628,26 @@ func formatCronLineRu(expr string) string {
 	if dom != "*" || mon != "*" {
 		return ""
 	}
+
+	// */N * * * * — every N minutes
+	if strings.HasPrefix(m, "*/") && h == "*" && dow == "*" {
+		n, err := strconv.Atoi(m[2:])
+		if err == nil && n > 0 {
+			return fmt.Sprintf("каждые %d %s", n, pluralRu(n, "минуту", "минуты", "минут"))
+		}
+	}
+	// 0 */N * * * — every N hours
+	if m == "0" && strings.HasPrefix(h, "*/") && dow == "*" {
+		n, err := strconv.Atoi(h[2:])
+		if err == nil && n > 0 {
+			return fmt.Sprintf("каждые %d %s", n, pluralRu(n, "час", "часа", "часов"))
+		}
+	}
+	// 0 * * * * — every hour
+	if m == "0" && h == "*" && dow == "*" {
+		return "каждый час"
+	}
+
 	mi, errM := strconv.Atoi(m)
 	hi, errH := strconv.Atoi(h)
 	if errM != nil || errH != nil {

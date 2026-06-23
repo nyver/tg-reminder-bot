@@ -72,6 +72,9 @@ type PriceConfig struct {
 	Timeout   time.Duration `yaml:"timeout"`
 	Headless  bool          `yaml:"headless"`
 	ProxyURL  string        `yaml:"proxy_url"`
+	// PollCron is the default cron schedule for price-drop reminders when the
+	// user does not specify an explicit interval. Standard 5-field cron syntax.
+	PollCron string `yaml:"poll_cron"`
 }
 
 type TravelConfig struct {
@@ -173,6 +176,7 @@ func defaults() *Config {
 			Price: PriceConfig{
 				UserAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
 				Timeout:   15 * time.Second,
+				PollCron:  "0 * * * *", // every hour
 			},
 			Travel: TravelConfig{
 				Timeout:        10 * time.Second,

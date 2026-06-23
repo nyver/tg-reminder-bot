@@ -44,11 +44,12 @@ type Event struct {
 }
 
 type Measurement struct {
-	Value     int64
-	Currency  string
-	Available bool
-	Title     string
-	Meta      map[string]string
+	Value      int64
+	Currency   string
+	Available  bool
+	Title      string
+	HTTPStatus int // non-zero when Available=false due to HTTP error
+	Meta       map[string]string
 }
 
 // TVShowtime is a single broadcast slot returned by TVScheduler.

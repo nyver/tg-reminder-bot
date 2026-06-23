@@ -132,8 +132,12 @@ func TestFormatCronLineRu(t *testing.T) {
 		{"30 8 * * 1", "каждый пн в 08:30"},
 		{"0 9 * * 1-5", "пн–пт в 09:00"},
 		{"0 9 * * 6", "каждую сб в 09:00"},
-		{"0 9 1 * *", ""},  // specific dom — unsupported
-		{"*/5 * * * *", ""}, // non-literal hour/min — unsupported
+		{"0 9 1 * *", ""},             // specific dom — unsupported
+		{"*/5 * * * *", "каждые 5 минут"},
+		{"*/30 * * * *", "каждые 30 минут"},
+		{"0 * * * *", "каждый час"},
+		{"0 */2 * * *", "каждые 2 часа"},
+		{"0 */12 * * *", "каждые 12 часов"},
 	}
 	for _, tc := range cases {
 		if got := formatCronLineRu(tc.expr); got != tc.want {

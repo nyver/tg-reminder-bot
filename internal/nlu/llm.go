@@ -326,6 +326,9 @@ func buildPrompt(text string, now time.Time) string {
 - «за 1 день до КВН на Первом» → kind=conditional, trigger=anchor, lead_time="24h", event.type=tv_program, event.title="КВН", event.params.channel="Первый канал"
 - «за 1 неделю до КВН на Первом» → kind=conditional, trigger=anchor, lead_time="168h", event.type=tv_program, event.title="КВН", event.params.channel="Первый канал"
 - «уведоми при снижении цены» + URL → kind=conditional, trigger=threshold, event.type=price, event.params.url=<URL>, event.title=название из текста или URL-slug (опусти если неясно)
+- «каждые 2 часа» при снижении цены → eval_cron="0 */2 * * *"
+- «каждые 30 минут» при снижении цены → eval_cron="*/30 * * * *"
+- «каждый час» / «раз в час» при снижении цены → eval_cron="0 * * * *"
 - «5 дешёвых билетов СПб→Калининград» → kind=conditional, trigger=digest, event.type=travel
 - horizon_days: «неделя»→7, «месяц»→30, «2 недели»→14, default→30
 - confidence: 0.9+ ясно, 0.5-0.9 допущения, <0.5 неясно

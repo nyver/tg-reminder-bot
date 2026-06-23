@@ -11,6 +11,15 @@ import (
 	"github.com/nyver2k/remindertgbot/internal/domain"
 )
 
+var (
+	// rePollEveryN matches "каждые N часов/минут".
+	rePollEveryN = regexp.MustCompile(`(?i)каждые?\s+(\d+)\s+(час(?:а|ов)?|минут(?:у|ы)?)`)
+	// rePollOnceIn matches "раз в N часов/минут".
+	rePollOnceIn = regexp.MustCompile(`(?i)раз\s+в\s+(\d+)\s+(час(?:а|ов)?|минут(?:у|ы)?)`)
+	// rePollEveryHour matches "каждый час" / "раз в час".
+	rePollEveryHour = regexp.MustCompile(`(?i)(?:каждый\s+час|раз\s+в\s+час\b)`)
+)
+
 // FastPath recognizes simple absolute and recurring reminders using regex.
 // Covers: «напомни [дата] в [время] [текст]» and «каждый [день/будний] в [время] [текст]».
 type FastPath struct {
@@ -64,7 +73,7 @@ func (p *FastPath) Parse(ctx context.Context, text string) (*ParseResult, error)
 	return &ParseResult{Spec: &domain.Spec{}, Confidence: 0}, nil
 }
 
-// parsePriceDrop detects "URL ... уведоми при снижении цены" patterns.
+// parsePriceDrop detects "URL ... уведоми при снижении цены [каждые N часов]" patterns.
 func parsePriceDrop(text string) *ParseResult {
 	u := ExtractURL(text)
 	if u == "" {
@@ -78,7 +87,8 @@ func parsePriceDrop(text string) *ParseResult {
 		return nil
 	}
 	return &ParseResult{
-		Kind: domain.KindConditional,
+		Kind:     domain.KindConditional,
+		EvalCron: parsePollCron(text),
 		Spec: &domain.Spec{
 			Trigger: domain.TriggerThreshold,
 			Message: "Уведомить при снижении цены",
@@ -89,6 +99,51 @@ func parsePriceDrop(text string) *ParseResult {
 		},
 		Confidence: 0.98,
 	}
+}
+
+// parsePollCron extracts a cron expression from poll-interval phrases like
+// "каждые 2 часа", "каждые 30 минут", "каждый час", "раз в час".
+// Returns "" when no interval is found (caller uses the system default).
+func parsePollCron(text string) string {
+	if rePollEveryHour.MatchString(text) {
+		// "каждый час" / "раз в час" — but rePollEveryN may also match "каждые 1 час",
+		// so check the more specific single-hour pattern first.
+		if m := rePollEveryN.FindStringSubmatch(text); m == nil {
+			return "0 * * * *"
+		}
+	}
+
+	if m := rePollEveryN.FindStringSubmatch(text); m != nil {
+		return intervalToCron(m[1], m[2])
+	}
+	if m := rePollOnceIn.FindStringSubmatch(text); m != nil {
+		return intervalToCron(m[1], m[2])
+	}
+	if rePollEveryHour.MatchString(text) {
+		return "0 * * * *"
+	}
+	return ""
+}
+
+func intervalToCron(nStr, unit string) string {
+	n, err := strconv.Atoi(nStr)
+	if err != nil || n <= 0 {
+		return ""
+	}
+	unit = strings.ToLower(unit)
+	switch {
+	case strings.HasPrefix(unit, "час"):
+		if n == 1 {
+			return "0 * * * *"
+		}
+		return fmt.Sprintf("0 */%d * * *", n)
+	case strings.HasPrefix(unit, "минут"):
+		if n == 1 {
+			return "* * * * *"
+		}
+		return fmt.Sprintf("*/%d * * * *", n)
+	}
+	return ""
 }
 
 // ExtractURL returns the first HTTP(S) URL found in s, trimming trailing punctuation.

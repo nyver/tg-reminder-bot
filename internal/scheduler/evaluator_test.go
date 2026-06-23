@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -77,11 +78,12 @@ func TestAnchorTransientErrorReturnsNil(t *testing.T) {
 	}
 }
 
-func TestThresholdProviderErrorReturnsNil(t *testing.T) {
+func TestThresholdProviderErrorNotifiesUser(t *testing.T) {
 	now := time.Date(2026, 6, 22, 8, 0, 0, 0, time.UTC)
 	registry := provider.NewRegistry()
 	registry.RegisterMetric(metricProviderFunc(func(context.Context, provider.Query) (provider.Measurement, error) {
-		return provider.Measurement{}, &netError{temporary: true}
+		// Simulate HTTP 429 returned via Measurement.HTTPStatus.
+		return provider.Measurement{Available: false, HTTPStatus: 429}, &netError{temporary: true}
 	}))
 	evaluator := NewEvaluator(registry, nil, clock.NewFake(now), 180, nil)
 	rem := domain.Reminder{
@@ -99,8 +101,11 @@ func TestThresholdProviderErrorReturnsNil(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected nil error on provider failure, got: %v", err)
 	}
-	if len(planned) != 0 {
-		t.Fatalf("expected no notifications on provider error, got %+v", planned)
+	if len(planned) != 1 {
+		t.Fatalf("expected 1 unavailability notification, got %d: %+v", len(planned), planned)
+	}
+	if !strings.Contains(planned[0].Text, "429") {
+		t.Fatalf("notification text should contain HTTP status 429, got: %s", planned[0].Text)
 	}
 }
 
