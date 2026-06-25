@@ -95,6 +95,7 @@ Compose автоматически:
 ```bash
 curl http://localhost:8080/healthz
 curl http://localhost:8080/readyz
+curl -H "Authorization: Bearer $ADMIN_API_TOKEN" http://localhost:8080/api/notifications?status=failed
 ```
 
 Остановка приложения:
@@ -156,6 +157,9 @@ volumes:
 | `LLM_API_KEY` | ключ OpenRouter или Anthropic |
 | `EPG_SERVICE_API_KEY` | Bearer-токен EPG Service |
 | `EPG_SERVICE_BASE_URL` | переопределение корневого URL EPG Service API |
+| `ADMIN_API_TOKEN` | Bearer-токен для `/api/*` и `/metrics`; без него admin API отключён |
+| `API_BIND` | адрес публикации API в Docker Compose, по умолчанию `127.0.0.1` |
+| `API_PORT` | внешний порт API в Docker Compose, по умолчанию `8080` |
 | `IPTVX_EPG_URL` | URL XMLTV/XMLTV.GZ для основного TV-провайдера |
 | `IPTVX_EPG_FILE` | путь к локальному кешу IPTVX EPG |
 | `DATABASE_DRIVER` | `sqlite` или `postgres` |
@@ -387,10 +391,12 @@ remindctl version
 
 - `GET /healthz` — liveness check.
 - `GET /readyz` — readiness check.
-- `GET /metrics` — метрики Prometheus.
+- `GET /metrics` — метрики Prometheus, требует `Authorization: Bearer <ADMIN_API_TOKEN>`.
 - `GET /api/users/{id}/reminders` — напоминания пользователя.
 - `GET /api/reminders/{id}` — напоминание по ID.
 - `GET /api/reminders/{id}/observations` — история наблюдений.
 - `POST /api/reminders/{id}/cancel` — отмена напоминания.
 - `GET /api/notifications` — уведомления.
 - `POST /api/notifications/{id}/retry` — повторная отправка.
+
+Все `/api/*` endpoints требуют `Authorization: Bearer <ADMIN_API_TOKEN>`.

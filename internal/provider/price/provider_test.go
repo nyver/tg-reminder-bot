@@ -20,6 +20,10 @@ func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
 }
 
+func publicLookup(context.Context, string) ([]net.IPAddr, error) {
+	return []net.IPAddr{{IP: net.ParseIP("93.184.216.34")}}, nil
+}
+
 func TestSampleRetriesTemporaryNetworkErrors(t *testing.T) {
 	attempts := 0
 	p := &Provider{
@@ -37,6 +41,7 @@ func TestSampleRetriesTemporaryNetworkErrors(t *testing.T) {
 		})},
 		userAgent: "test",
 		log:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		lookupIP:  publicLookup,
 	}
 
 	got, err := p.Sample(context.Background(), provider.Query{Params: map[string]string{"url": "https://shop.test/product"}})
@@ -60,6 +65,7 @@ func TestSampleDoesNotRetryPermanentNetworkError(t *testing.T) {
 		})},
 		userAgent: "test",
 		log:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		lookupIP:  publicLookup,
 	}
 
 	_, err := p.Sample(context.Background(), provider.Query{Params: map[string]string{"url": "https://shop.test/product"}})
@@ -80,6 +86,7 @@ func TestSampleStopsRetryingWhenContextIsCancelled(t *testing.T) {
 		})},
 		userAgent: "test",
 		log:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		lookupIP:  publicLookup,
 	}
 
 	started := time.Now()
@@ -89,5 +96,28 @@ func TestSampleStopsRetryingWhenContextIsCancelled(t *testing.T) {
 	}
 	if time.Since(started) >= retryBaseDelay {
 		t.Fatal("cancellation did not stop retry delay")
+	}
+}
+
+func TestValidateURLRejectsHostResolvingToPrivateIP(t *testing.T) {
+	p := &Provider{
+		lookupIP: func(context.Context, string) ([]net.IPAddr, error) {
+			return []net.IPAddr{{IP: net.ParseIP("169.254.169.254")}}, nil
+		},
+	}
+
+	err := p.validateURL(context.Background(), "https://metadata.example/product")
+	if err == nil {
+		t.Fatal("expected private resolved address to be rejected")
+	}
+	if !strings.Contains(err.Error(), "private resolved address") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestValidateURLRejectsPrivateIPLiteral(t *testing.T) {
+	p := &Provider{lookupIP: publicLookup}
+	if err := p.validateURL(context.Background(), "http://127.0.0.1/product"); err == nil {
+		t.Fatal("expected private IP literal to be rejected")
 	}
 }

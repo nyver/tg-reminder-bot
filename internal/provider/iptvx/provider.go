@@ -250,11 +250,16 @@ func (p *Provider) download(ctx context.Context) error {
 		return fmt.Errorf("iptvx: create tmp: %w", err)
 	}
 
-	_, copyErr := io.Copy(f, io.LimitReader(resp.Body, maxDownloadSize))
+	limited := &io.LimitedReader{R: resp.Body, N: maxDownloadSize + 1}
+	written, copyErr := io.Copy(f, limited)
 	_ = f.Close()
 	if copyErr != nil {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("iptvx: write: %w", copyErr)
+	}
+	if written > maxDownloadSize {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("iptvx: file exceeds %d bytes", maxDownloadSize)
 	}
 
 	if err := os.Rename(tmp, p.cfg.FilePath); err != nil {
@@ -280,9 +285,12 @@ func (p *Provider) importFile(ctx context.Context) error {
 	}
 	defer closer()
 
-	channels, progs, err := parseXMLTV(r)
+	channels, progs, parseErrs, err := parseXMLTV(r)
 	if err != nil {
 		return fmt.Errorf("iptvx: parse: %w", err)
+	}
+	if parseErrs > 0 {
+		p.log.Warn("iptvx: some EPG elements failed to decode", "skipped", parseErrs)
 	}
 
 	if err := p.store.ImportEPG(ctx, channels, progs); err != nil {
@@ -295,7 +303,8 @@ func (p *Provider) importFile(ctx context.Context) error {
 
 	p.log.Info("iptvx: EPG imported",
 		"channels", len(channels),
-		"programmes", len(progs))
+		"programmes", len(progs),
+		"parse_errors", parseErrs)
 	return nil
 }
 
@@ -414,9 +423,11 @@ func (p xmlProg) desc() string {
 }
 
 // parseXMLTV streams the XMLTV document without loading the full tree into memory.
-func parseXMLTV(r io.Reader) ([]EPGChannel, []EPGProgramme, error) {
+// Returns the number of elements that failed to decode alongside the parsed data.
+func parseXMLTV(r io.Reader) ([]EPGChannel, []EPGProgramme, int, error) {
 	var channels []EPGChannel
 	var progs []EPGProgramme
+	var parseErrs int
 	dec := xml.NewDecoder(r)
 
 	for {
@@ -425,7 +436,7 @@ func parseXMLTV(r io.Reader) ([]EPGChannel, []EPGProgramme, error) {
 			break
 		}
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, parseErrs, err
 		}
 
 		se, ok := tok.(xml.StartElement)
@@ -437,6 +448,7 @@ func parseXMLTV(r io.Reader) ([]EPGChannel, []EPGProgramme, error) {
 		case "channel":
 			var xc xmlChannel
 			if err := dec.DecodeElement(&xc, &se); err != nil {
+				parseErrs++
 				continue
 			}
 			if xc.ID != "" {
@@ -449,6 +461,7 @@ func parseXMLTV(r io.Reader) ([]EPGChannel, []EPGProgramme, error) {
 		case "programme":
 			var xp xmlProg
 			if err := dec.DecodeElement(&xp, &se); err != nil {
+				parseErrs++
 				continue
 			}
 			title := xp.title()
@@ -477,7 +490,7 @@ func parseXMLTV(r io.Reader) ([]EPGChannel, []EPGProgramme, error) {
 		return progs[i].StartsAt.Before(progs[j].StartsAt)
 	})
 
-	return channels, progs, nil
+	return channels, progs, parseErrs, nil
 }
 
 func parseXMLTVTime(s string) (time.Time, bool) {

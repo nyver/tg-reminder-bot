@@ -2,11 +2,14 @@ package httpapi
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -86,7 +89,7 @@ func (s *Server) requireToken(next http.Handler) http.Handler {
 			return
 		}
 		auth := r.Header.Get("Authorization")
-		if !strings.HasPrefix(auth, "Bearer ") || auth[len("Bearer "):] != token {
+		if !strings.HasPrefix(auth, "Bearer ") || subtle.ConstantTimeCompare([]byte(auth[len("Bearer "):]), []byte(token)) != 1 {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="remindbot-admin"`)
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 			return
@@ -97,8 +100,12 @@ func (s *Server) requireToken(next http.Handler) http.Handler {
 
 func (s *Server) Run(ctx context.Context, port int) error {
 	srv := &http.Server{
-		Addr:    fmt.Sprintf(":%d", port),
-		Handler: s.requireToken(s.mux),
+		Addr:              fmt.Sprintf(":%d", port),
+		Handler:           s.requireToken(s.mux),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 	go func() {
 		<-ctx.Done()
@@ -124,8 +131,18 @@ func (s *Server) handleReadyz(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) handleListReminders(w http.ResponseWriter, r *http.Request) {
-	// TODO M6: parse {id} from path using r.PathValue("id")
-	writeJSON(w, http.StatusOK, map[string]string{"status": "not implemented"})
+	userID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || userID <= 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid user id"})
+		return
+	}
+	rems, err := s.reminders.ListByUser(r.Context(), userID)
+	if err != nil {
+		s.log.Error("list reminders", "user_id", userID, "err", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+		return
+	}
+	writeJSON(w, http.StatusOK, rems)
 }
 
 func (s *Server) handleGetReminder(w http.ResponseWriter, r *http.Request) {
@@ -182,7 +199,8 @@ func (s *Server) handleListNotifications(w http.ResponseWriter, r *http.Request)
 	}
 	notifs, err := s.notifications.ListFailed(r.Context(), 50)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		s.log.Error("list notifications", "err", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
 	writeJSON(w, http.StatusOK, notifs)
@@ -196,7 +214,12 @@ func (s *Server) handleRetryNotification(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if err := s.notifications.Retry(r.Context(), id); err != nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found or not failed"})
+		if errors.Is(err, domain.ErrNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found or not in failed state"})
+			return
+		}
+		s.log.Error("retry notification", "id", id, "err", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "retrying"})

@@ -48,3 +48,21 @@ func TestDatabaseURLHasHighestPrecedence(t *testing.T) {
 		t.Fatalf("unexpected database config: %+v", cfg.Database)
 	}
 }
+
+func TestValidateRejectsInvalidPriceCron(t *testing.T) {
+	cfg := defaults()
+	cfg.Providers.Price.PollCron = "not a cron"
+
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected validation error")
+	}
+}
+
+func TestValidateRejectsNonPositiveTicks(t *testing.T) {
+	cfg := defaults()
+	cfg.Scheduler.WatcherTick = 0
+
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected validation error")
+	}
+}

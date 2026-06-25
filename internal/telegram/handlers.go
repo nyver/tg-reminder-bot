@@ -100,7 +100,8 @@ func (h *Handler) RegisterRoutes(bot *tele.Bot) {
 }
 
 func (h *Handler) handleStart(c tele.Context) error {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), handlerTimeout)
+	defer cancel()
 	if _, err := h.users.GetOrCreate(ctx, c.Sender().ID); err != nil {
 		h.log.Error("getorcreate user", "err", err)
 	}
@@ -112,7 +113,8 @@ func (h *Handler) handleHelp(c tele.Context) error {
 }
 
 func (h *Handler) handleList(c tele.Context) error {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), handlerTimeout)
+	defer cancel()
 	rems, err := h.reminders.ListByUser(ctx, c.Sender().ID)
 	if err != nil {
 		return c.Send("Ошибка при получении списка напоминаний.")
@@ -162,7 +164,8 @@ func (h *Handler) handleList(c tele.Context) error {
 }
 
 func (h *Handler) handleCancel(c tele.Context) error {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), handlerTimeout)
+	defer cancel()
 	args := strings.TrimSpace(c.Message().Payload)
 	if args == "" {
 		return c.Send("Укажите ID напоминания: `/cancel <id>`", tele.ModeMarkdown)
@@ -178,7 +181,8 @@ func (h *Handler) handleCancel(c tele.Context) error {
 }
 
 func (h *Handler) handleRemove(c tele.Context) error {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), handlerTimeout)
+	defer cancel()
 	args := strings.TrimSpace(c.Message().Payload)
 	if args == "" {
 		return c.Send("Укажите ID напоминания: `/remove <id>`", tele.ModeMarkdown)
@@ -194,7 +198,8 @@ func (h *Handler) handleRemove(c tele.Context) error {
 }
 
 func (h *Handler) handleRefresh(c tele.Context) error {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
 	args := strings.TrimSpace(c.Message().Payload)
 	if args == "" {
 		return c.Send("Укажите ID напоминания: `/refresh <id>`", tele.ModeMarkdown)
@@ -276,7 +281,8 @@ func (h *Handler) handleResume(c tele.Context) error {
 }
 
 func (h *Handler) setPause(c tele.Context, pause bool) error {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), handlerTimeout)
+	defer cancel()
 	args := strings.TrimSpace(c.Message().Payload)
 	if args == "" {
 		cmd := "pause"
@@ -300,7 +306,8 @@ func (h *Handler) setPause(c tele.Context, pause bool) error {
 }
 
 func (h *Handler) handleTZ(c tele.Context) error {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), handlerTimeout)
+	defer cancel()
 	tz := strings.TrimSpace(c.Message().Payload)
 	if tz == "" {
 		u, err := h.users.GetOrCreate(ctx, c.Sender().ID)
@@ -338,7 +345,8 @@ func (h *Handler) handleTV(c tele.Context) error {
 		)
 	}
 
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), handlerTimeout)
+	defer cancel()
 	userID := c.Sender().ID
 
 	loc, _ := time.LoadLocation("Europe/Moscow")
@@ -564,7 +572,8 @@ func writeTVShows(sb *strings.Builder, shows []provider.TVShowtime, fallbackChan
 }
 
 func (h *Handler) handleText(c tele.Context) error {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), handlerTimeout)
+	defer cancel()
 	userID := c.Sender().ID
 	text := c.Text()
 
@@ -572,6 +581,15 @@ func (h *Handler) handleText(c tele.Context) error {
 	if err != nil {
 		h.log.Error("dialog get", "err", err)
 		return c.Send("Внутренняя ошибка. Попробуйте снова.")
+	}
+
+	// Expire stale dialogs so users cannot accidentally confirm a days-old reminder.
+	if dialog.State != domain.DialogIdle {
+		if dc, decErr := decodeContext(dialog.Context); decErr == nil &&
+			!dc.CreatedAt.IsZero() && time.Since(dc.CreatedAt) > dialogTTL {
+			_ = h.dialogs.Reset(ctx, userID)
+			dialog.State = domain.DialogIdle
+		}
 	}
 
 	switch dialog.State {
@@ -588,8 +606,11 @@ func (h *Handler) handleText(c tele.Context) error {
 }
 
 func (h *Handler) startParsing(ctx context.Context, c tele.Context, userID int64, text string) error {
-	if _, err := h.users.GetOrCreate(ctx, userID); err != nil {
+	userTZ := ""
+	if u, err := h.users.GetOrCreate(ctx, userID); err != nil {
 		h.log.Warn("getorcreate user", "err", err)
+	} else {
+		userTZ = u.TZ
 	}
 
 	result, err := h.parser.Parse(ctx, text)
@@ -612,8 +633,14 @@ func (h *Handler) startParsing(ctx context.Context, c tele.Context, userID int64
 			FieldName:  result.Missing[0],
 			EvalCron:   result.EvalCron,
 			FireAt:     result.FireAt,
+			UserTZ:     userTZ,
+			CreatedAt:  time.Now(),
 		}
-		ctxJSON, _ := encodeContext(ctxData)
+		ctxJSON, err := encodeContext(ctxData)
+		if err != nil {
+			h.log.Error("encode dialog context", "err", err)
+			return c.Send("Внутренняя ошибка. Попробуйте снова.")
+		}
 		_ = h.dialogs.Set(ctx, &domain.Dialog{
 			UserID:  userID,
 			State:   domain.DialogAwaitField,
@@ -627,10 +654,10 @@ func (h *Handler) startParsing(ctx context.Context, c tele.Context, userID int64
 	}
 
 	// Show confirmation.
-	return h.askConfirmation(ctx, c, userID, text, result)
+	return h.askConfirmation(ctx, c, userID, text, result, userTZ)
 }
 
-func (h *Handler) askConfirmation(ctx context.Context, c tele.Context, userID int64, rawText string, result *nlu.ParseResult) error {
+func (h *Handler) askConfirmation(ctx context.Context, c tele.Context, userID int64, rawText string, result *nlu.ParseResult, userTZ string) error {
 	evalCron := result.EvalCron
 	if evalCron == "" && result.Spec != nil && result.Spec.Trigger == domain.TriggerThreshold {
 		evalCron = h.priceDefaultPollCron
@@ -642,8 +669,14 @@ func (h *Handler) askConfirmation(ctx context.Context, c tele.Context, userID in
 		Confidence: result.Confidence,
 		EvalCron:   evalCron,
 		FireAt:     result.FireAt,
+		UserTZ:     userTZ,
+		CreatedAt:  time.Now(),
 	}
-	ctxJSON, _ := encodeContext(ctxData)
+	ctxJSON, err := encodeContext(ctxData)
+	if err != nil {
+		h.log.Error("encode dialog context", "err", err)
+		return c.Send("Внутренняя ошибка. Попробуйте снова.")
+	}
 	_ = h.dialogs.Set(ctx, &domain.Dialog{
 		UserID:  userID,
 		State:   domain.DialogAwaitConfirm,
@@ -818,7 +851,8 @@ func formatPriceRub(kopecks int64, currency string) string {
 }
 
 func (h *Handler) handleConfirmYes(c tele.Context) error {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), handlerTimeout)
+	defer cancel()
 	userID := c.Sender().ID
 
 	dialog, err := h.dialogs.Get(ctx, userID)
@@ -828,6 +862,10 @@ func (h *Handler) handleConfirmYes(c tele.Context) error {
 	dc, err := decodeContext(dialog.Context)
 	if err != nil {
 		return c.Respond(&tele.CallbackResponse{Text: "Ошибка данных."})
+	}
+	if !dc.CreatedAt.IsZero() && time.Since(dc.CreatedAt) > dialogTTL {
+		_ = h.dialogs.Reset(ctx, userID)
+		return c.Respond(&tele.CallbackResponse{Text: "Сессия истекла. Начните заново."})
 	}
 
 	var spec domain.Spec
@@ -839,7 +877,7 @@ func (h *Handler) handleConfirmYes(c tele.Context) error {
 		Kind: dc.Kind, Spec: &spec, Confidence: dc.Confidence,
 		EvalCron: dc.EvalCron, FireAt: dc.FireAt,
 	}
-	rem, err := buildReminder(userID, dc.RawText, result, time.Now())
+	rem, err := buildReminder(userID, dc.RawText, result, time.Now(), dc.UserTZ)
 	if err != nil {
 		h.log.Error("build reminder", "err", err)
 		_ = h.dialogs.Reset(ctx, userID)
@@ -861,7 +899,8 @@ func (h *Handler) handleConfirmYes(c tele.Context) error {
 }
 
 func (h *Handler) handleConfirmNo(c tele.Context) error {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), handlerTimeout)
+	defer cancel()
 	_ = h.dialogs.Reset(ctx, c.Sender().ID)
 	_ = c.Respond(&tele.CallbackResponse{})
 	return c.Edit("Отменено. Отправьте новый текст напоминания.")
@@ -878,14 +917,21 @@ func (h *Handler) handleFieldInput(ctx context.Context, c tele.Context, dialog *
 	combined := dc.RawText + " " + text
 	result, err := h.parser.Parse(ctx, combined)
 	if err != nil {
-		return c.Send("Не удалось распознать. Попробуйте ещё раз.")
+		// Don't leave user stuck — reset dialog so next message starts fresh.
+		_ = h.dialogs.Reset(ctx, c.Sender().ID)
+		return c.Send("Не удалось распознать. Попробуйте описать напоминание заново.")
 	}
-	return h.askConfirmation(ctx, c, c.Sender().ID, combined, result)
+	return h.askConfirmation(ctx, c, c.Sender().ID, combined, result, dc.UserTZ)
 }
 
-const defaultConditionalCron = "*/5 * * * *"
+const (
+	defaultConditionalCron = "*/5 * * * *"
+	// handlerTimeout caps the total wall time of a single Telegram handler.
+	// Prevents goroutine leaks when DB or external calls hang indefinitely.
+	handlerTimeout = 15 * time.Second
+)
 
-func buildReminder(userID int64, rawText string, result *nlu.ParseResult, now time.Time) (*domain.Reminder, error) {
+func buildReminder(userID int64, rawText string, result *nlu.ParseResult, now time.Time, userTZ string) (*domain.Reminder, error) {
 	if err := validateParseResult(result); err != nil {
 		return nil, err
 	}
@@ -916,7 +962,7 @@ func buildReminder(userID int64, rawText string, result *nlu.ParseResult, now ti
 		}
 	case domain.KindRecurring:
 		rem.EvalCron = result.EvalCron
-		next, err := nextCronAt(result.EvalCron, now)
+		next, err := nextCronAt(result.EvalCron, now, userTZ)
 		if err != nil {
 			return nil, err
 		}
@@ -1019,6 +1065,13 @@ func validateParseResult(result *nlu.ParseResult) error {
 			if result.Spec.Event.Params["channel"] == "" && result.Spec.Event.Params["channel_id"] == "" {
 				return fmt.Errorf("TV reminder has no channel")
 			}
+		case "travel":
+			if result.Spec.Trigger != domain.TriggerDigest {
+				return fmt.Errorf("travel reminder requires digest trigger")
+			}
+			if result.Spec.Event.Params["origin"] == "" || result.Spec.Event.Params["destination"] == "" {
+				return fmt.Errorf("travel reminder requires origin and destination")
+			}
 		default:
 			if result.Spec.Event.Title == "" {
 				return fmt.Errorf("conditional reminder is incomplete")
@@ -1061,14 +1114,23 @@ func parseCron(expr string) (cron.Schedule, error) {
 	return schedule, nil
 }
 
-func nextCronAt(expr string, now time.Time) (time.Time, error) {
+func nextCronAt(expr string, now time.Time, userTZ string) (time.Time, error) {
 	schedule, err := parseCron(expr)
 	if err != nil {
 		return time.Time{}, err
 	}
-	loc, err := time.LoadLocation("Europe/Moscow")
-	if err != nil {
-		loc = time.UTC
+	loc := time.UTC
+	if userTZ != "" {
+		if l, err := time.LoadLocation(userTZ); err == nil {
+			loc = l
+		}
+	}
+	if loc == time.UTC {
+		// Fall back to Moscow when user has not configured a timezone,
+		// preserving historical behaviour for Russian-speaking users.
+		if msk, err := time.LoadLocation("Europe/Moscow"); err == nil {
+			loc = msk
+		}
 	}
 	return schedule.Next(now.In(loc)), nil
 }
@@ -1132,9 +1194,15 @@ func formatDurationRu(d time.Duration) string {
 	case d%time.Hour == 0:
 		n := int(d / time.Hour)
 		return fmt.Sprintf("%d %s", n, pluralRu(n, "час", "часа", "часов"))
-	default:
+	case d >= time.Minute:
 		n := int(d / time.Minute)
 		return fmt.Sprintf("%d %s", n, pluralRu(n, "минуту", "минуты", "минут"))
+	default:
+		n := int(d / time.Second)
+		if n <= 0 {
+			n = 1
+		}
+		return fmt.Sprintf("%d %s", n, pluralRu(n, "секунду", "секунды", "секунд"))
 	}
 }
 
@@ -1168,16 +1236,17 @@ func fieldPrompt(field string) string {
 	}
 }
 
-func escapeMarkdown(s string) string {
-	replacer := strings.NewReplacer(
-		"_", "\\_", "*", "\\*", "[", "\\[", "]", "\\]",
-		"(", "\\(", ")", "\\)", "~", "\\~", "`", "\\`",
-		">", "\\>", "#", "\\#", "+", "\\+", "-", "\\-",
-		"=", "\\=", "|", "\\|", "{", "\\{", "}", "\\}",
-		".", "\\.", "!", "\\!",
-	)
-	return replacer.Replace(s)
-}
+// mdReplacer escapes all MarkdownV2 special characters.
+// Initialised once at package load — strings.NewReplacer is not cheap.
+var mdReplacer = strings.NewReplacer(
+	"_", "\\_", "*", "\\*", "[", "\\[", "]", "\\]",
+	"(", "\\(", ")", "\\)", "~", "\\~", "`", "\\`",
+	">", "\\>", "#", "\\#", "+", "\\+", "-", "\\-",
+	"=", "\\=", "|", "\\|", "{", "\\{", "}", "\\}",
+	".", "\\.", "!", "\\!",
+)
+
+func escapeMarkdown(s string) string { return mdReplacer.Replace(s) }
 
 func mustMarshal(v interface{}) json.RawMessage {
 	b, _ := json.Marshal(v)

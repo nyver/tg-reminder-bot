@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/robfig/cron/v3"
 	"gopkg.in/yaml.v3"
 )
 
@@ -128,6 +129,9 @@ func LoadOrDefaults() (*Config, error) {
 	if os.IsNotExist(err) {
 		cfg = defaults()
 		applyEnvOverrides(cfg)
+		if err := cfg.Validate(); err != nil {
+			return nil, err
+		}
 		return cfg, nil
 	}
 	return cfg, err
@@ -251,6 +255,49 @@ func (cfg *Config) Validate() error {
 	case "debug", "info", "warn", "error":
 	default:
 		return fmt.Errorf("config: server.log_level must be one of: debug, info, warn, error")
+	}
+	if cfg.Server.APIPort <= 0 || cfg.Server.APIPort > 65535 {
+		return fmt.Errorf("config: server.api_port must be between 1 and 65535")
+	}
+	if cfg.Scheduler.WatcherTick <= 0 {
+		return fmt.Errorf("config: scheduler.watcher_tick must be positive")
+	}
+	if cfg.Scheduler.DeliveryTick <= 0 {
+		return fmt.Errorf("config: scheduler.delivery_tick must be positive")
+	}
+	if cfg.Scheduler.HousekeepingTick <= 0 {
+		return fmt.Errorf("config: scheduler.housekeeping_tick must be positive")
+	}
+	if cfg.NLU.OpenRouter.Timeout <= 0 {
+		return fmt.Errorf("config: nlu.openrouter.timeout must be positive")
+	}
+	if cfg.NLU.OpenRouter.MaxTokens <= 0 {
+		return fmt.Errorf("config: nlu.openrouter.max_tokens must be positive")
+	}
+	if cfg.Providers.TV.Timeout <= 0 {
+		return fmt.Errorf("config: providers.tv.timeout must be positive")
+	}
+	if cfg.Providers.IPTVX.Timeout <= 0 {
+		return fmt.Errorf("config: providers.iptvx.timeout must be positive")
+	}
+	if cfg.Providers.IPTVX.UpdateInterval <= 0 {
+		return fmt.Errorf("config: providers.iptvx.update_interval must be positive")
+	}
+	if cfg.Providers.Price.Timeout <= 0 {
+		return fmt.Errorf("config: providers.price.timeout must be positive")
+	}
+	if strings.TrimSpace(cfg.Providers.Price.PollCron) == "" {
+		return fmt.Errorf("config: providers.price.poll_cron is required")
+	}
+	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
+	if _, err := parser.Parse(cfg.Providers.Price.PollCron); err != nil {
+		return fmt.Errorf("config: providers.price.poll_cron is invalid: %w", err)
+	}
+	if cfg.Providers.Travel.Timeout <= 0 {
+		return fmt.Errorf("config: providers.travel.timeout must be positive")
+	}
+	if cfg.Providers.Travel.MaxHorizonDays <= 0 {
+		return fmt.Errorf("config: providers.travel.max_horizon_days must be positive")
 	}
 	return nil
 }

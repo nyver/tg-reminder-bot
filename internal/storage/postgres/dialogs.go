@@ -2,7 +2,9 @@ package postgres
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 
 	"github.com/nyver2k/remindertgbot/internal/domain"
 )
@@ -19,13 +21,16 @@ func (r *DialogRepo) Get(ctx context.Context, userID int64) (*domain.Dialog, err
 	d := &domain.Dialog{}
 	var ctxStr string
 	err := row.Scan(&d.UserID, &d.State, &ctxStr, &d.UpdatedAt)
-	if err != nil {
+	if errors.Is(err, sql.ErrNoRows) {
 		// Return empty idle state for first-time users.
 		return &domain.Dialog{
 			UserID:  userID,
 			State:   domain.DialogIdle,
 			Context: json.RawMessage("{}"),
 		}, nil
+	}
+	if err != nil {
+		return nil, err
 	}
 	d.Context = json.RawMessage(ctxStr)
 	return d, nil

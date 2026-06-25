@@ -3,10 +3,10 @@ package main
 import (
 	"context"
 	"database/sql"
+	"flag"
 	"fmt"
 	"log/slog"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -108,8 +108,16 @@ func runReminders(args []string) {
 
 	switch args[0] {
 	case "list":
-		userID := parseUserFlag(args)
-		rems, err := repo.ListByUser(ctx, userID)
+		fs := flag.NewFlagSet("reminders list", flag.ContinueOnError)
+		fs.SetOutput(os.Stderr)
+		userID := fs.Int64("user", 0, "Telegram user ID")
+		if err := fs.Parse(args[1:]); err != nil {
+			exitf("usage: reminders list --user <id>")
+		}
+		if *userID <= 0 {
+			exitf("usage: reminders list --user <id>")
+		}
+		rems, err := repo.ListByUser(ctx, *userID)
 		if err != nil {
 			exitf("list: %v", err)
 		}
@@ -130,23 +138,24 @@ func runProvider(args []string) {
 		exitf("usage: provider travel [flags]")
 	}
 	cfg := mustConfig()
-	var origin, dest, modes string
-	horizonDays := 30
-	top := 5
-
-	for i := 1; i < len(args); i++ {
-		switch args[i] {
-		case "--from":
-			origin = nextArg(args, i)
-		case "--to":
-			dest = nextArg(args, i)
-		case "--modes":
-			modes = nextArg(args, i)
-		case "--horizon-days":
-			horizonDays, _ = strconv.Atoi(nextArg(args, i))
-		case "--top":
-			top, _ = strconv.Atoi(nextArg(args, i))
-		}
+	fs := flag.NewFlagSet("provider travel", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	origin := fs.String("from", "", "origin city")
+	dest := fs.String("to", "", "destination city")
+	modes := fs.String("modes", "", "comma-separated modes")
+	horizonDays := fs.Int("horizon-days", 30, "search horizon in days")
+	top := fs.Int("top", 5, "number of offers to print")
+	if err := fs.Parse(args[1:]); err != nil {
+		exitf("usage: provider travel [flags]")
+	}
+	if *origin == "" || *dest == "" {
+		exitf("--from and --to are required")
+	}
+	if *horizonDays <= 0 {
+		exitf("--horizon-days must be positive")
+	}
+	if *top <= 0 {
+		exitf("--top must be positive")
 	}
 
 	log := slog.Default()
@@ -156,30 +165,30 @@ func runProvider(args []string) {
 	)
 
 	from := startOfDay(time.Now())
-	to := from.AddDate(0, 0, horizonDays)
+	to := from.AddDate(0, 0, *horizonDays)
 	q := provider.SearchQuery{
-		Origin:      origin,
-		Destination: dest,
+		Origin:      *origin,
+		Destination: *dest,
 		DateFrom:    from,
 		DateTo:      to,
-		Modes:       splitModes(modes),
+		Modes:       splitModes(*modes),
 		Limit:       50,
 	}
 
 	fmt.Printf("Поиск %s → %s, горизонт %d дней (%s – %s)\n",
-		origin, dest, horizonDays, from.Format("02.01"), to.Format("02.01.06"))
+		*origin, *dest, *horizonDays, from.Format("02.01"), to.Format("02.01.06"))
 
 	offers, err := agg.Search(context.Background(), q)
 	if err != nil {
 		exitf("search: %v", err)
 	}
 
-	topOffers := scheduler.PickTopN(offers, top)
+	topOffers := scheduler.PickTopN(offers, *top)
 	if len(topOffers) == 0 {
 		fmt.Println("Предложения не найдены.")
 		return
 	}
-	fmt.Printf("\nТоп-%d предложений:\n", top)
+	fmt.Printf("\nТоп-%d предложений:\n", *top)
 	for i, o := range topOffers {
 		fmt.Printf("%d. [%s] %s · %s · %.0f руб.\n",
 			i+1, o.Mode, o.Title, o.DepartAt.Format("02 Jan 15:04"), float64(o.Price)/100)
@@ -217,23 +226,6 @@ func mustConfig() *config.Config {
 func exitf(format string, args ...interface{}) {
 	fmt.Fprintf(os.Stderr, "error: "+format+"\n", args...)
 	os.Exit(1)
-}
-
-func nextArg(args []string, i int) string {
-	if i+1 < len(args) {
-		return args[i+1]
-	}
-	return ""
-}
-
-func parseUserFlag(args []string) int64 {
-	for i, a := range args {
-		if a == "--user" && i+1 < len(args) {
-			v, _ := strconv.ParseInt(args[i+1], 10, 64)
-			return v
-		}
-	}
-	return 0
 }
 
 func startOfDay(t time.Time) time.Time {

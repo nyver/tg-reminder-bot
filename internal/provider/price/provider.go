@@ -45,6 +45,7 @@ type Provider struct {
 	headless   bool
 	proxyURL   string
 	log        *slog.Logger
+	lookupIP   func(context.Context, string) ([]net.IPAddr, error)
 
 	// Headless browser resources. Lazily initialized on first headless request.
 	allocOnce   sync.Once
@@ -57,12 +58,45 @@ func New(userAgent string, timeout time.Duration, headless bool, proxyURL string
 		timeout = 15 * time.Second
 	}
 	jar, _ := cookiejar.New(nil)
+
+	// safeDialContext resolves DNS and validates each resolved IP at connect time,
+	// closing the DNS-rebinding window that exists when validation and dialing are
+	// separate steps (SSRF prevention).
+	safeDialContext := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, err
+		}
+		if isPrivateIPLiteral(host) {
+			return nil, fmt.Errorf("connection to private host %q blocked", host)
+		}
+		lookupCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		addrs, err := net.DefaultResolver.LookupIPAddr(lookupCtx, host)
+		cancel()
+		if err != nil {
+			return nil, err
+		}
+		if len(addrs) == 0 {
+			return nil, fmt.Errorf("no addresses resolved for %s", host)
+		}
+		for _, a := range addrs {
+			if isPrivateIP(a.IP) {
+				return nil, fmt.Errorf("connection to private IP %s (→%s) blocked", host, a.IP)
+			}
+		}
+		// Connect directly to the first resolved IP so the OS cannot silently
+		// re-resolve the hostname to a different (private) address mid-flight.
+		d := net.Dialer{}
+		return d.DialContext(ctx, network, net.JoinHostPort(addrs[0].IP.String(), port))
+	}
+
 	// Force HTTP/1.1 by disabling TLS ALPN upgrade to h2.
 	// Many WAFs (including DNS shop's) fingerprint the HTTP/2 stream and reject
 	// non-browser clients; HTTP/1.1 is harder to distinguish from a real browser.
 	transport := &http.Transport{
 		TLSNextProto:    make(map[string]func(string, *tls.Conn) http.RoundTripper),
 		IdleConnTimeout: 30 * time.Second,
+		DialContext:     safeDialContext,
 	}
 	if headless {
 		log.Info("price: headless mode enabled — Chromium required in runtime")
@@ -77,6 +111,7 @@ func New(userAgent string, timeout time.Duration, headless bool, proxyURL string
 		headless:   headless,
 		proxyURL:   proxyURL,
 		log:        log,
+		lookupIP:   net.DefaultResolver.LookupIPAddr,
 	}
 }
 
@@ -341,7 +376,7 @@ func (p *Provider) Sample(ctx context.Context, q provider.Query) (provider.Measu
 	if rawURL == "" {
 		return provider.Measurement{}, fmt.Errorf("price provider: url param required")
 	}
-	if err := validateURL(rawURL); err != nil {
+	if err := p.validateURL(ctx, rawURL); err != nil {
 		return provider.Measurement{}, fmt.Errorf("price provider: %w", err)
 	}
 
@@ -514,8 +549,18 @@ func (p *Provider) fetchPage(ctx context.Context, rawURL, referer string) ([]byt
 }
 
 func isTemporaryNetworkError(err error) bool {
+	// net.Error.Temporary() is deprecated since Go 1.18. Use Timeout() for the
+	// generic case, and check net.DNSError.IsTemporary explicitly for DNS failures
+	// (e.g. "server misbehaving" / SERVFAIL), which are worth retrying.
 	var netErr net.Error
-	return errors.As(err, &netErr) && (netErr.Timeout() || netErr.Temporary())
+	if !errors.As(err, &netErr) {
+		return false
+	}
+	if netErr.Timeout() {
+		return true
+	}
+	var dnsErr *net.DNSError
+	return errors.As(err, &dnsErr) && dnsErr.IsTemporary
 }
 
 // warmSession visits the site root so the cookie jar captures any WAF session
@@ -854,7 +899,11 @@ func redactURL(raw string) string {
 
 // --- URL validation ---
 
-func validateURL(raw string) error {
+// validateURL checks the user-supplied URL for obvious abuse (bad scheme, private
+// IP literals) and pre-resolves DNS to reject known-private targets early.
+// A second, independent SSRF guard runs inside the transport's DialContext at
+// TCP-connect time, closing the DNS-rebinding window between these two checks.
+func (p *Provider) validateURL(ctx context.Context, raw string) error {
 	u, err := url.Parse(raw)
 	if err != nil {
 		return err
@@ -862,13 +911,35 @@ func validateURL(raw string) error {
 	if u.Scheme != "https" && u.Scheme != "http" {
 		return fmt.Errorf("unsupported scheme: %s", u.Scheme)
 	}
-	if isPrivateHost(u.Hostname()) {
-		return fmt.Errorf("private host not allowed: %s", u.Hostname())
+	host := u.Hostname()
+	if host == "" {
+		return fmt.Errorf("host is required")
+	}
+	if isPrivateIPLiteral(host) {
+		return fmt.Errorf("private host not allowed: %s", host)
+	}
+	lookup := p.lookupIP
+	if lookup == nil {
+		lookup = net.DefaultResolver.LookupIPAddr
+	}
+	lookupCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	addrs, err := lookup(lookupCtx, host)
+	if err != nil {
+		return fmt.Errorf("resolve host %s: %w", host, err)
+	}
+	if len(addrs) == 0 {
+		return fmt.Errorf("resolve host %s: no addresses", host)
+	}
+	for _, addr := range addrs {
+		if isPrivateIP(addr.IP) {
+			return fmt.Errorf("private resolved address not allowed: %s -> %s", host, addr.IP)
+		}
 	}
 	return nil
 }
 
-func isPrivateHost(host string) bool {
+func isPrivateIPLiteral(host string) bool {
 	h := strings.ToLower(strings.TrimSpace(host))
 	if h == "localhost" || h == "0.0.0.0" {
 		return true
@@ -877,6 +948,10 @@ func isPrivateHost(host string) bool {
 	if ip == nil {
 		return false
 	}
+	return isPrivateIP(ip)
+}
+
+func isPrivateIP(ip net.IP) bool {
 	for _, private := range privateNets {
 		if private.Contains(ip) {
 			return true

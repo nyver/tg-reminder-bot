@@ -3,6 +3,7 @@ package telegram
 import (
 	"context"
 	"encoding/json"
+	"time"
 
 	"github.com/nyver2k/remindertgbot/internal/domain"
 )
@@ -14,6 +15,10 @@ type DialogStore interface {
 	Reset(ctx context.Context, userID int64) error
 }
 
+// dialogTTL is the maximum age of a dialog before it is automatically reset.
+// Prevents accidental confirmation of stale reminders started days/weeks ago.
+const dialogTTL = 30 * time.Minute
+
 // DialogContext carries the pending NLU parse result while awaiting confirmation.
 type DialogContext struct {
 	RawText    string          `json:"raw_text"`
@@ -24,6 +29,8 @@ type DialogContext struct {
 	FieldName  string          `json:"field_name,omitempty"` // for await_field state
 	EvalCron   string          `json:"eval_cron,omitempty"`
 	FireAt     *string         `json:"fire_at,omitempty"`
+	UserTZ     string          `json:"user_tz,omitempty"`  // user's IANA timezone for cron scheduling
+	CreatedAt  time.Time       `json:"created_at,omitempty"` // for TTL enforcement
 }
 
 func encodeContext(dc *DialogContext) (json.RawMessage, error) {

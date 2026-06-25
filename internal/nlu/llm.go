@@ -297,6 +297,15 @@ func (p *LLMParser) Parse(ctx context.Context, text string) (*ParseResult, error
 	return mapToResult(&resp)
 }
 
+// sanitizeForPrompt заменяет XML-значимые символы в пользовательском тексте,
+// чтобы он не мог вырваться за пределы тега <user_request> и подменить инструкции.
+func sanitizeForPrompt(s string) string {
+	s = strings.ReplaceAll(s, "&", "&amp;")
+	s = strings.ReplaceAll(s, "<", "&lt;")
+	s = strings.ReplaceAll(s, ">", "&gt;")
+	return s
+}
+
 func buildPrompt(text string, now time.Time) string {
 	return fmt.Sprintf(`Ты — система распознавания намерений (NLU) для бота напоминаний.
 Сейчас: %s (MSK).
@@ -336,7 +345,7 @@ func buildPrompt(text string, now time.Time) string {
 
 <user_request>
 %s
-</user_request>`, now.Format("02 Jan 2006 15:04 MST"), text)
+</user_request>`, now.Format("02 Jan 2006 15:04 MST"), sanitizeForPrompt(text))
 }
 
 func extractText(msg *anthropic.Message) string {

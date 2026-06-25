@@ -48,7 +48,7 @@ func TestBuildConditionalReminderSchedulesImmediateEvaluation(t *testing.T) {
 		Confidence: 0.95,
 	}
 
-	rem, err := buildReminder(1, "raw", result, now)
+	rem, err := buildReminder(1, "raw", result, now, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,6 +57,39 @@ func TestBuildConditionalReminderSchedulesImmediateEvaluation(t *testing.T) {
 	}
 	if rem.NextEvalAt == nil || !rem.NextEvalAt.Equal(now) {
 		t.Fatalf("next_eval_at = %v", rem.NextEvalAt)
+	}
+}
+
+func TestBuildTravelDigestReminder(t *testing.T) {
+	now := time.Date(2026, 6, 21, 17, 30, 0, 0, time.UTC)
+	result := &nlu.ParseResult{
+		Kind: domain.KindConditional,
+		Spec: &domain.Spec{
+			Trigger:     domain.TriggerDigest,
+			TopN:        5,
+			HorizonDays: 30,
+			Event: domain.EventSpec{
+				Type: "travel",
+				Params: map[string]string{
+					"origin":      "SPB",
+					"destination": "KGD",
+					"modes":       "air,rail",
+				},
+			},
+		},
+		Confidence: 0.95,
+		EvalCron:   "0 9 * * *",
+	}
+
+	rem, err := buildReminder(1, "raw", result, now, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rem.Kind != domain.KindConditional || rem.EvalCron != "0 9 * * *" {
+		t.Fatalf("unexpected reminder: %+v", rem)
+	}
+	if rem.NextEvalAt == nil {
+		t.Fatal("expected NextEvalAt to be set")
 	}
 }
 
@@ -69,7 +102,7 @@ func TestBuildAbsoluteReminderPreservesFireAt(t *testing.T) {
 		FireAt:     &fireAt,
 	}
 
-	rem, err := buildReminder(1, "raw", result, time.Now())
+	rem, err := buildReminder(1, "raw", result, time.Now(), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +165,7 @@ func TestFormatCronLineRu(t *testing.T) {
 		{"30 8 * * 1", "каждый пн в 08:30"},
 		{"0 9 * * 1-5", "пн–пт в 09:00"},
 		{"0 9 * * 6", "каждую сб в 09:00"},
-		{"0 9 1 * *", ""},             // specific dom — unsupported
+		{"0 9 1 * *", ""}, // specific dom — unsupported
 		{"*/5 * * * *", "каждые 5 минут"},
 		{"*/30 * * * *", "каждые 30 минут"},
 		{"0 * * * *", "каждый час"},
@@ -209,7 +242,7 @@ func TestBuildAbsoluteNonAnchorReminderPreservesFireAt(t *testing.T) {
 		FireAt:     &fireAt,
 	}
 
-	rem, err := buildReminder(1, "raw", result, now)
+	rem, err := buildReminder(1, "raw", result, now, "")
 	if err != nil {
 		t.Fatal(err)
 	}

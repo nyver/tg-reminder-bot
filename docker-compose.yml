@@ -13,6 +13,7 @@ x-app: &app
     LLM_API_KEY: ${LLM_API_KEY:-}
     EPG_SERVICE_API_KEY: ${EPG_SERVICE_API_KEY:-}
     EPG_SERVICE_BASE_URL: ${EPG_SERVICE_BASE_URL:-}
+    ADMIN_API_TOKEN: ${ADMIN_API_TOKEN:-}
     LOG_LEVEL: ${LOG_LEVEL:-}
     DATABASE_DRIVER: ${DATABASE_DRIVER:-sqlite}
     DATABASE_DSN: ${DATABASE_DSN:-/data/remind.db}
@@ -38,6 +39,15 @@ services:
   worker:
     <<: *app
     command: ["/usr/local/bin/worker"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  api:
+    <<: *app
+    command: ["/usr/local/bin/api"]
+    ports:
+      - "${API_BIND:-127.0.0.1}:${API_PORT:-8080}:8080"
     depends_on:
       migrate:
         condition: service_completed_successfully
