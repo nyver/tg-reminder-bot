@@ -348,3 +348,81 @@ func TestType(t *testing.T) {
 		t.Fatalf("Type() = %q, want tv_program", got)
 	}
 }
+
+// TestEnsureImported_skipsWhenFreshFileAndWarmDB verifies that ensureImported
+// does not re-download or re-import when the cached file is younger than
+// UpdateInterval AND the DB already contains future programmes.
+func TestEnsureImported_skipsWhenFreshFileAndWarmDB(t *testing.T) {
+	t.Parallel()
+
+	loc, _ := time.LoadLocation("Europe/Moscow")
+	futureStart := time.Now().Add(2 * time.Hour).In(loc)
+
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "epg.xml")
+	// Write a fresh file (mod-time = now → younger than 24 h UpdateInterval).
+	if err := os.WriteFile(filePath, []byte(makeXMLTV(futureStart, futureStart.Add(time.Hour))), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Pre-populate store so HasFutureSchedule returns true.
+	store := &memStore{
+		channels: []EPGChannel{{ID: "1", DisplayName: "Первый канал"}},
+		progs:    []EPGProgramme{{ChannelID: "1", Title: "Тест", StartsAt: futureStart}},
+	}
+	store.imports = 1
+
+	p := newTestProvider(t, "http://should-not-be-called", filePath, store)
+	if err := p.ensureImported(context.Background()); err != nil {
+		t.Fatalf("ensureImported: %v", err)
+	}
+	if store.imports != 1 {
+		t.Fatalf("imports = %d, want 1 (expected skip)", store.imports)
+	}
+}
+
+// TestEnsureImported_reimportsWhenFileIsStale verifies that ensureImported
+// re-downloads and re-imports even when the DB has future programmes, as long as
+// the cached file is older than UpdateInterval. This is the fix for the bug where
+// update_interval was effectively ignored once data was seeded into the DB.
+func TestEnsureImported_reimportsWhenFileIsStale(t *testing.T) {
+	t.Parallel()
+
+	loc, _ := time.LoadLocation("Europe/Moscow")
+	futureStart := time.Now().Add(2 * time.Hour).In(loc)
+
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "epg.xml")
+	// Write a stale file — mod-time is 30 days in the past.
+	if err := os.WriteFile(filePath, []byte(makeXMLTV(futureStart, futureStart.Add(time.Hour))), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	oldTime := time.Now().Add(-30 * 24 * time.Hour)
+	if err := os.Chtimes(filePath, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+
+	// Serve fresh data from the mock HTTP server.
+	freshStart := futureStart.Add(48 * time.Hour)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = w.Write([]byte(makeXMLTV(freshStart, freshStart.Add(time.Hour))))
+	}))
+	defer srv.Close()
+
+	// Pre-populate store so HasFutureSchedule returns true (simulates "warm DB").
+	store := &memStore{
+		channels: []EPGChannel{{ID: "1", DisplayName: "Первый канал"}},
+		progs:    []EPGProgramme{{ChannelID: "1", Title: "Старая передача", StartsAt: futureStart}},
+	}
+	store.imports = 1
+
+	p := newTestProvider(t, srv.URL, filePath, store)
+	if err := p.ensureImported(context.Background()); err != nil {
+		t.Fatalf("ensureImported: %v", err)
+	}
+	// Must have incremented: stale file forced a re-download + re-import.
+	if store.imports != 2 {
+		t.Fatalf("imports = %d, want 2 (expected re-import due to stale file)", store.imports)
+	}
+}

@@ -182,27 +182,31 @@ func (p *Provider) Lookup(ctx context.Context, q provider.Query, from, to time.T
 // with a fresh EPG schedule.
 //
 // Priority:
-//  1. DB has channels AND at least one programme in the future → warm cache, done.
+//  1. Local file is fresh (age < UpdateInterval) AND DB has channels with future
+//     programmes → warm cache, done.
 //  2. Otherwise: download the file if absent/stale, then parse+import into DB.
 func (p *Provider) ensureImported(ctx context.Context) error {
-	// Check the DB first, regardless of whether the local file exists.
-	// This handles container restarts where the file is gone but the DB is intact.
-	channels, dbErr := p.store.Channels(ctx)
-	if dbErr == nil && len(channels) > 0 {
-		hasFuture, _ := p.store.HasFutureSchedule(ctx)
-		if hasFuture {
-			p.chMu.Lock()
-			p.channels = channels
-			p.chMu.Unlock()
-			p.log.Info("iptvx: EPG already in DB, skipping import", "channels", len(channels))
-			return nil
-		}
-	}
-
-	// DB is empty or all programmes are in the past: (re)download if the file is stale.
+	// File freshness is the primary signal: if the file is younger than
+	// UpdateInterval AND the DB already has future data, nothing to do.
 	info, err := os.Stat(p.cfg.FilePath)
 	fileStale := err != nil || time.Since(info.ModTime()) >= p.cfg.UpdateInterval
 
+	if !fileStale {
+		channels, dbErr := p.store.Channels(ctx)
+		if dbErr == nil && len(channels) > 0 {
+			hasFuture, _ := p.store.HasFutureSchedule(ctx)
+			if hasFuture {
+				p.chMu.Lock()
+				p.channels = channels
+				p.chMu.Unlock()
+				p.log.Info("iptvx: EPG already in DB, skipping import", "channels", len(channels))
+				return nil
+			}
+		}
+	}
+
+	// File is stale (or missing): re-download, then import.
+	// File is fresh but DB is empty/expired: skip download, import from file.
 	if fileStale {
 		if dlErr := p.download(ctx); dlErr != nil {
 			if _, statErr := os.Stat(p.cfg.FilePath); statErr == nil {
