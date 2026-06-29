@@ -54,8 +54,9 @@ providers:
     # Полный архив (~100 MB): https://iptvx.one/epg/epg.xml.gz
     # Облегчённый (~15 MB):   https://iptvx.one/epg/epg_lite.xml.gz
     url: https://iptvx.one/epg/epg.xml.gz
-    # Локальный кеш. Для Docker используйте /data/iptvx_epg.xml.gz.
-    file_path: ./data/iptvx_epg.xml.gz
+    # Локальный кеш (абсолютный путь внутри тома /data).
+    # Для запуска вне Docker замените на ./data/iptvx_epg.xml.gz.
+    file_path: /data/iptvx_epg.xml.gz
     # Период проверки свежести и обновления расписания (файл выходит раз в неделю).
     update_interval: 168h
     # Таймаут скачивания большого EPG-файла.
