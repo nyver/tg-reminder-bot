@@ -10,7 +10,7 @@ ENV CGO_ENABLED=0 GOOS=linux
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     set -eux; \
-    for cmd in bot worker api remindctl; do \
+    for cmd in bot worker remindctl; do \
       go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" \
         -o /out/$cmd ./cmd/$cmd; \
     done; \

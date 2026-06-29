@@ -105,8 +105,6 @@ scheduler:
   housekeeping_tick: 1h
 
 server:
-  # Внутренний порт HTTP API. В Compose внешний порт задаётся API_PORT.
-  api_port: 8080
   # Идентификатор worker для lease; пустое значение генерируется автоматически.
   worker_id: ""
   # Допустимые уровни: debug, info, warn, error.

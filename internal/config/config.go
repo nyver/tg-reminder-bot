@@ -92,7 +92,6 @@ type SchedulerConfig struct {
 }
 
 type ServerConfig struct {
-	APIPort  int    `yaml:"api_port"`
 	WorkerID string `yaml:"worker_id"`
 	LogLevel string `yaml:"log_level"`
 }
@@ -193,7 +192,6 @@ func defaults() *Config {
 			HousekeepingTick: time.Hour,
 		},
 		Server: ServerConfig{
-			APIPort:  8080,
 			LogLevel: "info",
 		},
 	}
@@ -255,9 +253,6 @@ func (cfg *Config) Validate() error {
 	case "debug", "info", "warn", "error":
 	default:
 		return fmt.Errorf("config: server.log_level must be one of: debug, info, warn, error")
-	}
-	if cfg.Server.APIPort <= 0 || cfg.Server.APIPort > 65535 {
-		return fmt.Errorf("config: server.api_port must be between 1 and 65535")
 	}
 	if cfg.Scheduler.WatcherTick <= 0 {
 		return fmt.Errorf("config: scheduler.watcher_tick must be positive")
