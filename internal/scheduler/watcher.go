@@ -111,10 +111,11 @@ func (w *Watcher) processReminder(ctx context.Context, rem domain.Reminder) {
 	planned, err := w.evaluator.Evaluate(ctx, rem)
 	if err != nil {
 		w.log.Error("evaluate reminder", "id", rem.ID, "err", err)
-		_ = w.reminders.UpdateNextEval(ctx, rem.ID, nextEval(rem))
+		w.scheduleRetry(ctx, rem.ID)
 		return
 	}
 
+	enqueueFailed := false
 	for _, p := range planned {
 		n := &domain.ScheduledNotification{
 			ReminderID:     rem.ID,
@@ -125,31 +126,58 @@ func (w *Watcher) processReminder(ctx context.Context, rem domain.Reminder) {
 		}
 		if err := w.notifications.Enqueue(ctx, n); err != nil {
 			w.log.Error("enqueue notification", "reminder_id", rem.ID, "err", err)
+			enqueueFailed = true
 		}
+	}
+	if enqueueFailed {
+		w.scheduleRetry(ctx, rem.ID)
+		return
 	}
 
 	// Advance recurring/conditional reminders; finish one-shot reminders.
-	next := nextEval(rem)
-	if next == nil {
-		_ = w.reminders.UpdateStatus(ctx, rem.ID, domain.StatusDone)
+	next, err := nextEval(rem)
+	if err != nil {
+		w.log.Error("calculate next evaluation", "id", rem.ID, "err", err)
+		if updateErr := w.reminders.UpdateStatus(ctx, rem.ID, domain.StatusFailed); updateErr != nil {
+			w.log.Error("mark reminder failed", "id", rem.ID, "err", updateErr)
+		}
 		return
 	}
-	_ = w.reminders.UpdateNextEval(ctx, rem.ID, next)
+	if next == nil {
+		if err := w.reminders.UpdateStatus(ctx, rem.ID, domain.StatusDone); err != nil {
+			w.log.Error("finish reminder", "id", rem.ID, "err", err)
+		}
+		return
+	}
+	if err := w.reminders.UpdateNextEval(ctx, rem.ID, next); err != nil {
+		w.log.Error("advance reminder", "id", rem.ID, "err", err)
+	}
+}
+
+func (w *Watcher) scheduleRetry(ctx context.Context, id uuid.UUID) {
+	delay := w.tick
+	if delay < time.Minute {
+		delay = time.Minute
+	}
+	retryAt := time.Now().UTC().Add(delay)
+	if err := w.reminders.UpdateNextEval(ctx, id, &retryAt); err != nil {
+		w.log.Error("schedule reminder retry", "id", id, "err", err)
+	}
 }
 
 // nextEval computes the next watcher evaluation time from the cron expression.
-// For absolute reminders (no cron) returns nil → done.
-func nextEval(rem domain.Reminder) *time.Time {
+// For absolute reminders (no cron), it returns nil, nil.
+func nextEval(rem domain.Reminder) (*time.Time, error) {
 	if rem.EvalCron == "" {
-		return nil
+		return nil, nil
 	}
 	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
 	schedule, err := parser.Parse(rem.EvalCron)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	next := schedule.Next(time.Now().In(userTZ(rem)))
-	return &next
+	return &next, nil
 }
 
 func updateActiveMetrics(_ context.Context, _ ReminderStore) {

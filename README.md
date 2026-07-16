@@ -46,6 +46,11 @@ plain-text description. The bot recognizes the parameters, asks a
 clarifying question if needed, and offers a confirmation button before
 creating it.
 
+For smoother day-to-day use, `/start`, `/help`, and an empty `/list` show a
+small persistent Telegram keyboard with the most common commands. During
+confirmation the inline buttons are still available, but users can also reply
+with plain text such as `yes`, `no`, `да`, or `нет`.
+
 Example messages (the bot's NLU understands Russian):
 
 ```text

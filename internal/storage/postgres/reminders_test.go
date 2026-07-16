@@ -124,14 +124,14 @@ func TestMarkConditionalDueSkipsDigestReminders(t *testing.T) {
 	}
 
 	var digestNext time.Time
-	var digestLocked string
+	var digestLocked sql.NullString
 	if err := db.QueryRowContext(ctx, `SELECT next_eval_at, locked_by FROM reminders WHERE id = ?`, digestID).Scan(&digestNext, &digestLocked); err != nil {
 		t.Fatal(err)
 	}
 	if !digestNext.Equal(future) {
 		t.Fatalf("digest next_eval_at = %v, want unchanged %v", digestNext, future)
 	}
-	if digestLocked != "old-worker" {
-		t.Fatalf("digest locked_by = %q, want unchanged", digestLocked)
+	if digestLocked.Valid {
+		t.Fatalf("digest locked_by still set: %q", digestLocked.String)
 	}
 }

@@ -13,6 +13,8 @@ database:
 telegram:
   # Token from BotFather. A non-empty TELEGRAM_TOKEN overrides this field.
   token: "${TELEGRAM_TOKEN}"
+  # The bot shows a persistent quick-command keyboard in Telegram clients.
+  # No extra configuration is required; users can still type free-form text.
 
 nlu:
   # LLM used for natural-language parsing: openrouter or claude.

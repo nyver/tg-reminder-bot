@@ -131,13 +131,76 @@ func TestWriteListReminderRSSIsCompact(t *testing.T) {
 	}
 	for _, want := range []string{
 		"*RSS дайджест: openai\\.com, blog\\.google, theverge\\.com*",
+		"`активно`",
 		"Рассылка: `18:00` · топ\\-7",
 		"Ленты \\(3\\): openai\\.com, blog\\.google, theverge\\.com",
 		"`/run 04e914b7-adb0-48ad-ae87-690f6550751a`",
+		"`/pause 04e914b7-adb0-48ad-ae87-690f6550751a`",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("list item missing %q in:\n%s", want, got)
 		}
+	}
+}
+
+func TestBuildListMessagesSplitsLongOutput(t *testing.T) {
+	rems := make([]domain.Reminder, 30)
+	for i := range rems {
+		rems[i] = domain.Reminder{
+			ID:      uuid.New(),
+			RawText: strings.Repeat("длинное напоминание ", 30),
+			Status:  domain.StatusActive,
+		}
+	}
+
+	messages := (&Handler{}).buildListMessages(context.Background(), rems, time.UTC)
+	if len(messages) < 2 {
+		t.Fatalf("expected multiple list messages, got %d", len(messages))
+	}
+	joined := strings.Join(messages, "")
+	for i, message := range messages {
+		if got := runeLen(message); got > telegramListMessageLimit {
+			t.Fatalf("message %d has %d runes, limit is %d", i, got, telegramListMessageLimit)
+		}
+	}
+	for _, rem := range rems {
+		if !strings.Contains(joined, rem.ID.String()) {
+			t.Fatalf("list output is missing reminder %s", rem.ID)
+		}
+	}
+}
+
+type staticPriceHistory struct {
+	observation *domain.Observation
+}
+
+func (s staticPriceHistory) Last(context.Context, uuid.UUID) (*domain.Observation, error) {
+	return s.observation, nil
+}
+
+func TestWriteListPriceDoesNotRepeatTitle(t *testing.T) {
+	rem := domain.Reminder{
+		ID:     uuid.New(),
+		Status: domain.StatusActive,
+		Spec: domain.Spec{
+			Trigger: domain.TriggerThreshold,
+			Event: domain.EventSpec{
+				Type:  "price",
+				Title: "Laptop Pro",
+			},
+		},
+	}
+	h := &Handler{history: staticPriceHistory{observation: &domain.Observation{
+		Title:      "Laptop Pro",
+		Value:      100_000,
+		Currency:   "RUB",
+		ObservedAt: time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC),
+	}}}
+
+	var sb strings.Builder
+	h.writeListReminder(context.Background(), &sb, 1, rem, time.UTC)
+	if got := strings.Count(sb.String(), "Laptop Pro"); got != 1 {
+		t.Fatalf("title appears %d times in:\n%s", got, sb.String())
 	}
 }
 
@@ -498,5 +561,50 @@ func TestCronToHHMM(t *testing.T) {
 	}
 	if got := cronToHHMM("not a cron"); got != "not a cron" {
 		t.Errorf("cronToHHMM fallback = %q", got)
+	}
+}
+
+func TestConfirmationDecision(t *testing.T) {
+	cases := []struct {
+		text string
+		want confirmDecision
+	}{
+		{"да", confirmDecisionYes},
+		{" Да! ", confirmDecisionYes},
+		{"создать", confirmDecisionYes},
+		{"нет", confirmDecisionNo},
+		{"исправить", confirmDecisionNo},
+		{"не понял", confirmDecisionUnknown},
+	}
+	for _, tc := range cases {
+		if got := confirmationDecision(tc.text); got != tc.want {
+			t.Errorf("confirmationDecision(%q) = %v, want %v", tc.text, got, tc.want)
+		}
+	}
+}
+
+func TestMainMenuContainsQuickCommands(t *testing.T) {
+	menu := mainMenu()
+	if menu == nil {
+		t.Fatal("expected menu")
+	}
+	if !menu.ResizeKeyboard || !menu.IsPersistent {
+		t.Fatalf("unexpected menu flags: resize=%v persistent=%v", menu.ResizeKeyboard, menu.IsPersistent)
+	}
+	if len(menu.ReplyKeyboard) != 3 {
+		t.Fatalf("rows = %d, want 3", len(menu.ReplyKeyboard))
+	}
+	got := []string{
+		menu.ReplyKeyboard[0][0].Text,
+		menu.ReplyKeyboard[0][1].Text,
+		menu.ReplyKeyboard[1][0].Text,
+		menu.ReplyKeyboard[1][1].Text,
+		menu.ReplyKeyboard[2][0].Text,
+	}
+	want := []string{"/list", "/help", "/tv", "/rss", "/tz"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("button %d = %q, want %q", i, got[i], want[i])
+		}
 	}
 }

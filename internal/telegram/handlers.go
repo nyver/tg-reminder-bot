@@ -112,11 +112,11 @@ func (h *Handler) handleStart(c tele.Context) error {
 	if _, err := h.users.GetOrCreate(ctx, c.Sender().ID); err != nil {
 		h.log.Error("getorcreate user", "err", err)
 	}
-	return c.Send(msgWelcome, tele.ModeMarkdown)
+	return c.Send(msgWelcome, mainMenu(), tele.ModeMarkdown)
 }
 
 func (h *Handler) handleHelp(c tele.Context) error {
-	return c.Send(msgHelp, tele.ModeMarkdown)
+	return c.Send(msgHelp, mainMenu(), tele.ModeMarkdown)
 }
 
 func (h *Handler) handleList(c tele.Context) error {
@@ -127,7 +127,7 @@ func (h *Handler) handleList(c tele.Context) error {
 		return c.Send("Ошибка при получении списка напоминаний.")
 	}
 	if len(rems) == 0 {
-		return c.Send("У вас нет активных напоминаний.")
+		return c.Send(msgEmptyList, mainMenu(), tele.ModeMarkdown)
 	}
 
 	loc, _ := time.LoadLocation("Europe/Moscow")
@@ -137,16 +137,39 @@ func (h *Handler) handleList(c tele.Context) error {
 		}
 	}
 
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("*Ваши напоминания:* %d\n\n", len(rems)))
-	for i, r := range rems {
-		h.writeListReminder(ctx, &sb, i+1, r, loc)
+	for _, message := range h.buildListMessages(ctx, rems, loc) {
+		if err := c.Send(message, tele.ModeMarkdownV2); err != nil {
+			return err
+		}
 	}
-	return c.Send(sb.String(), tele.ModeMarkdownV2)
+	return nil
+}
+
+func (h *Handler) buildListMessages(ctx context.Context, rems []domain.Reminder, loc *time.Location) []string {
+	const continuationHeader = "*Ваши напоминания \\(продолжение\\):*\n\n"
+
+	var messages []string
+	var current strings.Builder
+	current.WriteString(fmt.Sprintf("*Ваши напоминания:* %d\n\n", len(rems)))
+	for i, r := range rems {
+		var item strings.Builder
+		h.writeListReminder(ctx, &item, i+1, r, loc)
+		if runeLen(current.String())+runeLen(item.String()) > telegramListMessageLimit {
+			messages = append(messages, current.String())
+			current.Reset()
+			current.WriteString(continuationHeader)
+		}
+		current.WriteString(item.String())
+	}
+	if current.Len() > 0 {
+		messages = append(messages, current.String())
+	}
+	return messages
 }
 
 func (h *Handler) writeListReminder(ctx context.Context, sb *strings.Builder, index int, r domain.Reminder, loc *time.Location) {
-	sb.WriteString(fmt.Sprintf("%d\\. *%s* `%s`\n", index, escapeMarkdown(listReminderTitle(r)), escapeMarkdown(statusLabel(r.Status))))
+	title := truncateRunes(listReminderTitle(r), listReminderTitleLimit)
+	sb.WriteString(fmt.Sprintf("%d\\. *%s* `%s`\n", index, escapeMarkdown(title), escapeMarkdown(statusLabel(r.Status))))
 
 	switch {
 	case r.Spec.Trigger == domain.TriggerDigest && r.Spec.Event.Type == "rss":
@@ -210,8 +233,8 @@ func (h *Handler) writeListPriceDetails(ctx context.Context, sb *strings.Builder
 			if title == "" {
 				title = r.Spec.Event.Title
 			}
-			if title != "" && title != listReminderTitle(r) {
-				sb.WriteString("   📌 " + escapeMarkdown(title) + "\n")
+			if title != "" && strings.TrimSpace(title) != strings.TrimSpace(r.Spec.Event.Title) {
+				sb.WriteString("   📌 " + escapeMarkdown(truncateRunes(title, listReminderTitleLimit)) + "\n")
 			}
 			at := obs.ObservedAt.In(loc).Format("02.01 15:04")
 			sb.WriteString(fmt.Sprintf("   💰 Последняя цена: *%s* \\(%s\\)\n",
@@ -219,8 +242,6 @@ func (h *Handler) writeListPriceDetails(ctx context.Context, sb *strings.Builder
 				escapeMarkdown(at),
 			))
 		}
-	} else if title := r.Spec.Event.Title; title != "" {
-		sb.WriteString("   📌 " + escapeMarkdown(title) + "\n")
 	}
 	if u := r.Spec.Event.Params["url"]; u != "" {
 		sb.WriteString("   🔗 " + escapeMarkdown(feedHost(u)) + "\n")
@@ -230,7 +251,7 @@ func (h *Handler) writeListPriceDetails(ctx context.Context, sb *strings.Builder
 
 func writeListTVDetails(sb *strings.Builder, r domain.Reminder) {
 	if ch := r.Spec.Event.Params["channel"]; ch != "" {
-		sb.WriteString("   📺 " + escapeMarkdown(ch) + "\n")
+		sb.WriteString("   📺 " + escapeMarkdown(truncateRunes(ch, listReminderTitleLimit)) + "\n")
 	}
 	if r.Spec.LeadTime.Duration > 0 {
 		sb.WriteString("   ⏰ За " + escapeMarkdown(formatDurationRu(r.Spec.LeadTime.Duration)) + "\n")
@@ -240,7 +261,11 @@ func writeListTVDetails(sb *strings.Builder, r domain.Reminder) {
 func writeListActions(sb *strings.Builder, r domain.Reminder) {
 	id := r.ID.String()
 	sb.WriteString(fmt.Sprintf("   ▶️ `/run %s`\n", id))
-	sb.WriteString(fmt.Sprintf("   ⏸ `/cancel %s`   🗑 `/remove %s`\n", id, id))
+	command, icon := "pause", "⏸"
+	if r.Status != domain.StatusActive {
+		command, icon = "resume", "⏯"
+	}
+	sb.WriteString(fmt.Sprintf("   %s `/%s %s`   🗑 `/remove %s`\n", icon, command, id, id))
 }
 
 func splitFeedURLs(raw string) []string {
@@ -257,13 +282,13 @@ func splitFeedURLs(raw string) []string {
 func statusLabel(status domain.Status) string {
 	switch status {
 	case domain.StatusActive:
-		return "active"
+		return "активно"
 	case domain.StatusPaused:
-		return "paused"
+		return "пауза"
 	case domain.StatusDone:
-		return "done"
+		return "завершено"
 	case domain.StatusFailed:
-		return "failed"
+		return "ошибка"
 	default:
 		return string(status)
 	}
@@ -274,6 +299,18 @@ func orDefaultInt(v, def int) int {
 		return def
 	}
 	return v
+}
+
+func runeLen(s string) int {
+	return len([]rune(s))
+}
+
+func truncateRunes(s string, limit int) string {
+	runes := []rune(strings.TrimSpace(s))
+	if len(runes) <= limit {
+		return string(runes)
+	}
+	return strings.TrimSpace(string(runes[:limit-1])) + "…"
 }
 
 func (h *Handler) handleCancel(c tele.Context) error {
@@ -932,8 +969,15 @@ func (h *Handler) handleText(c tele.Context) error {
 
 	switch dialog.State {
 	case domain.DialogAwaitConfirm:
-		// Пользователь набрал текст вместо нажатия кнопки — переспросим.
-		return c.Send("Пожалуйста, используйте кнопки ниже.")
+		switch confirmationDecision(text) {
+		case confirmDecisionYes:
+			return h.confirmReminderByText(ctx, c, userID)
+		case confirmDecisionNo:
+			_ = h.dialogs.Reset(ctx, userID)
+			return c.Send("Ок, не создаю. Пришлите новый текст напоминания, когда будете готовы.", mainMenu())
+		default:
+			return c.Send("Ответьте «да», чтобы создать, или «нет», чтобы исправить текст. Кнопки под сообщением тоже работают.")
+		}
 
 	case domain.DialogAwaitField:
 		return h.handleFieldInput(ctx, c, dialog, text)
@@ -944,6 +988,8 @@ func (h *Handler) handleText(c tele.Context) error {
 }
 
 func (h *Handler) startParsing(ctx context.Context, c tele.Context, userID int64, text string) error {
+	_ = c.Bot().Notify(c.Sender(), tele.Typing)
+
 	userTZ := ""
 	if u, err := h.users.GetOrCreate(ctx, userID); err != nil {
 		h.log.Warn("getorcreate user", "err", err)
@@ -954,10 +1000,10 @@ func (h *Handler) startParsing(ctx context.Context, c tele.Context, userID int64
 	result, err := h.parser.Parse(ctx, text)
 	if err != nil {
 		h.log.Error("parse failed", "err", err)
-		return c.Send("Не удалось распознать напоминание. Попробуйте переформулировать.")
+		return c.Send(msgParseFailed, mainMenu())
 	}
 	if result == nil || result.Spec == nil || result.Confidence <= 0 {
-		return c.Send("Не удалось распознать напоминание. Попробуйте переформулировать.")
+		return c.Send(msgParseFailed, mainMenu())
 	}
 
 	// Ask clarification if fields are missing.
@@ -1188,27 +1234,77 @@ func formatPriceRub(kopecks int64, currency string) string {
 	return string(result) + " " + sym
 }
 
+var (
+	errPendingSessionExpired = errors.New("pending reminder session expired")
+	errPendingDialogData     = errors.New("pending reminder dialog data is invalid")
+	errPendingReminderSpec   = errors.New("pending reminder spec is invalid")
+)
+
 func (h *Handler) handleConfirmYes(c tele.Context) error {
 	ctx, cancel := context.WithTimeout(context.Background(), handlerTimeout)
 	defer cancel()
 	userID := c.Sender().ID
 
+	err := h.createReminderFromDialog(ctx, userID)
+	if err != nil {
+		switch {
+		case errors.Is(err, errPendingSessionExpired):
+			return c.Respond(&tele.CallbackResponse{Text: "Сессия истекла. Начните заново."})
+		case errors.Is(err, errPendingDialogData):
+			return c.Respond(&tele.CallbackResponse{Text: "Ошибка данных."})
+		case errors.Is(err, errPendingReminderSpec):
+			return c.Respond(&tele.CallbackResponse{Text: "Некорректные параметры напоминания."})
+		case errors.Is(err, domain.ErrAlreadyExists):
+			_ = c.Respond(&tele.CallbackResponse{})
+			return c.Edit("ℹ️ У вас уже есть такое напоминание.")
+		default:
+			h.log.Error("create reminder", "err", err)
+			return c.Respond(&tele.CallbackResponse{Text: "Ошибка сохранения."})
+		}
+	}
+
+	_ = c.Respond(&tele.CallbackResponse{})
+	return c.Edit("✅ Напоминание создано!\n\n/list — посмотреть все напоминания")
+}
+
+func (h *Handler) confirmReminderByText(ctx context.Context, c tele.Context, userID int64) error {
+	err := h.createReminderFromDialog(ctx, userID)
+	if err != nil {
+		switch {
+		case errors.Is(err, errPendingSessionExpired):
+			return c.Send("Сессия истекла. Пришлите текст напоминания заново.", mainMenu())
+		case errors.Is(err, errPendingDialogData):
+			return c.Send("Не удалось прочитать черновик напоминания. Начните заново.", mainMenu())
+		case errors.Is(err, errPendingReminderSpec):
+			return c.Send("Параметры напоминания выглядят некорректно. Попробуйте переформулировать.", mainMenu())
+		case errors.Is(err, domain.ErrAlreadyExists):
+			return c.Send("ℹ️ У вас уже есть такое напоминание.", mainMenu())
+		default:
+			h.log.Error("create reminder", "err", err)
+			return c.Send("Не удалось сохранить напоминание. Попробуйте позже.", mainMenu())
+		}
+	}
+
+	return c.Send("✅ Напоминание создано!\n\n/list — посмотреть все напоминания", mainMenu())
+}
+
+func (h *Handler) createReminderFromDialog(ctx context.Context, userID int64) error {
 	dialog, err := h.dialogs.Get(ctx, userID)
 	if err != nil || dialog.State != domain.DialogAwaitConfirm {
-		return c.Respond(&tele.CallbackResponse{Text: "Сессия истекла. Начните заново."})
+		return errPendingSessionExpired
 	}
 	dc, err := decodeContext(dialog.Context)
 	if err != nil {
-		return c.Respond(&tele.CallbackResponse{Text: "Ошибка данных."})
+		return errPendingDialogData
 	}
 	if !dc.CreatedAt.IsZero() && time.Since(dc.CreatedAt) > dialogTTL {
 		_ = h.dialogs.Reset(ctx, userID)
-		return c.Respond(&tele.CallbackResponse{Text: "Сессия истекла. Начните заново."})
+		return errPendingSessionExpired
 	}
 
 	var spec domain.Spec
 	if err := json.Unmarshal(dc.ParsedSpec, &spec); err != nil {
-		return c.Respond(&tele.CallbackResponse{Text: "Ошибка данных."})
+		return errPendingDialogData
 	}
 
 	result := &nlu.ParseResult{
@@ -1219,21 +1315,18 @@ func (h *Handler) handleConfirmYes(c tele.Context) error {
 	if err != nil {
 		h.log.Error("build reminder", "err", err)
 		_ = h.dialogs.Reset(ctx, userID)
-		return c.Respond(&tele.CallbackResponse{Text: "Некорректные параметры напоминания."})
+		return errPendingReminderSpec
 	}
 	if err := h.reminders.Create(ctx, rem); err != nil {
 		if errors.Is(err, domain.ErrAlreadyExists) {
 			_ = h.dialogs.Reset(ctx, userID)
-			_ = c.Respond(&tele.CallbackResponse{})
-			return c.Edit("ℹ️ У вас уже есть такое напоминание.")
+			return domain.ErrAlreadyExists
 		}
-		h.log.Error("create reminder", "err", err)
-		return c.Respond(&tele.CallbackResponse{Text: "Ошибка сохранения."})
+		return err
 	}
 
 	_ = h.dialogs.Reset(ctx, userID)
-	_ = c.Respond(&tele.CallbackResponse{})
-	return c.Edit("✅ Напоминание создано!")
+	return nil
 }
 
 func (h *Handler) handleConfirmNo(c tele.Context) error {
@@ -1266,7 +1359,9 @@ const (
 	defaultConditionalCron = "*/5 * * * *"
 	// handlerTimeout caps the total wall time of a single Telegram handler.
 	// Prevents goroutine leaks when DB or external calls hang indefinitely.
-	handlerTimeout = 15 * time.Second
+	handlerTimeout           = 15 * time.Second
+	telegramListMessageLimit = 3500
+	listReminderTitleLimit   = 240
 )
 
 func buildReminder(userID int64, rawText string, result *nlu.ParseResult, now time.Time, userTZ string) (*domain.Reminder, error) {
@@ -1616,18 +1711,72 @@ func mustMarshal(v interface{}) json.RawMessage {
 	return b
 }
 
+type confirmDecision int
+
+const (
+	confirmDecisionUnknown confirmDecision = iota
+	confirmDecisionYes
+	confirmDecisionNo
+)
+
+func confirmationDecision(text string) confirmDecision {
+	normalized := strings.ToLower(strings.TrimSpace(text))
+	normalized = strings.Trim(normalized, ".!, ")
+	switch normalized {
+	case "да", "д", "yes", "y", "ok", "ок", "создать", "сохрани", "сохранить", "подтверждаю":
+		return confirmDecisionYes
+	case "нет", "не", "n", "no", "отмена", "отменить", "исправить", "переделать", "назад":
+		return confirmDecisionNo
+	default:
+		return confirmDecisionUnknown
+	}
+}
+
+func mainMenu() *tele.ReplyMarkup {
+	menu := &tele.ReplyMarkup{
+		ResizeKeyboard: true,
+		IsPersistent:   true,
+		Placeholder:    "Напишите напоминание или выберите команду",
+	}
+	menu.Reply(
+		menu.Row(menu.Text("/list"), menu.Text("/help")),
+		menu.Row(menu.Text("/tv"), menu.Text("/rss")),
+		menu.Row(menu.Text("/tz")),
+	)
+	return menu
+}
+
 const msgWelcome = `*Привет! Я бот напоминаний.*
 
-Просто напишите что-нибудь вроде:
-• «напомни 25 декабря в 10:00 поздравить маму»
+Просто напишите обычным текстом, что и когда нужно напомнить. Я уточню детали и попрошу подтвердить перед сохранением.
+
+Например:
+• «напомни завтра в 9:00 позвонить маме»
 • «каждый будний день в 9:00 напоминай выпить таблетку»
-• «уведоми за 1 неделю до КВН на Первом канале»
+• «уведоми при снижении цены: https://example.com/product»
 
 /tv — расписание TV программ
+/rss — ежедневный RSS-дайджест
 /help — справка
 /list — список напоминаний`
 
-const msgHelp = `*Команды:*
+const msgEmptyList = `У вас пока нет активных напоминаний.
+
+Напишите мне обычной фразой, например:
+• «напомни завтра в 9:00 позвонить маме»
+• «каждый понедельник в 8:30 напоминай про совещание»
+• «уведоми при снижении цены: https://example.com/product»`
+
+const msgParseFailed = `Не удалось распознать напоминание.
+
+Попробуйте написать проще: что сделать и когда.
+Например: «напомни завтра в 9:00 позвонить маме».`
+
+const msgHelp = `*Что можно сделать*
+
+Напоминание можно создать без команды: просто отправьте текст, а я покажу черновик и попрошу подтверждение.
+
+*Команды:*
 
 /list — список активных напоминаний
 /cancel <id> — отменить напоминание
