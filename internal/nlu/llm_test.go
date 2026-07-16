@@ -1,10 +1,13 @@
 package nlu
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -112,6 +115,55 @@ func TestOpenRouterParser_fallbackOn404(t *testing.T) {
 	}
 	if n := requests.Load(); n != 2 {
 		t.Fatalf("total requests = %d, want 2", n)
+	}
+}
+
+func TestOpenRouterParserLogsInitialModelAndFallback(t *testing.T) {
+	var requests atomic.Int32
+
+	const primaryModel = "primary/model"
+	const fallbackModel = "fallback/model"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		idx := requests.Add(1)
+		if idx == 1 {
+			http.Error(w, `{"error":"rate limited"}`, http.StatusTooManyRequests)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"kind\":\"absolute\",\"message\":\"test\",\"confidence\":0.95}"}}]}`))
+	}))
+	defer server.Close()
+
+	var logs bytes.Buffer
+	log := slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	parser, err := NewConfiguredLLMParser(
+		"openrouter", "test-key", primaryModel, server.URL,
+		[]string{fallbackModel}, 0, 0, time.UTC, log,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := parser.Parse(context.Background(), "test"); err != nil {
+		t.Fatal(err)
+	}
+
+	out := logs.String()
+	for _, want := range []string{
+		`"msg":"llm request"`,
+		`"component":"nlu_parser"`,
+		`"provider":"openrouter"`,
+		`"model":"primary/model"`,
+		`"fallback":false`,
+		`"msg":"llm fallback"`,
+		`"failed_model":"primary/model"`,
+		`"next_model":"fallback/model"`,
+		`"model":"fallback/model"`,
+		`"fallback":true`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("logs missing %s in:\n%s", want, out)
+		}
 	}
 }
 

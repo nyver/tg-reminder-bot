@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -24,14 +25,16 @@ type NewsRanker struct {
 
 // NewConfiguredNewsRanker builds a NewsRanker using the same provider/model
 // configuration as the NLU intent parser (see NewConfiguredLLMParser).
-func NewConfiguredNewsRanker(providerName, apiKey, model, baseURL string, fallbackModels []string, timeout time.Duration, maxTokens int) (*NewsRanker, error) {
+func NewConfiguredNewsRanker(providerName, apiKey, model, baseURL string, fallbackModels []string, timeout time.Duration, maxTokens int, logs ...*slog.Logger) (*NewsRanker, error) {
 	if maxTokens <= 0 {
 		maxTokens = 1024
 	}
+	log := optionalLogger(logs...)
 	switch providerName {
 	case "claude":
 		client := anthropic.NewClient(option.WithAPIKey(apiKey))
 		return &NewsRanker{complete: func(ctx context.Context, prompt string) (string, error) {
+			log.Info("llm request", "component", "news_ranker", "provider", "claude", "model", model, "fallback", false)
 			msg, err := client.Messages.New(ctx, anthropic.MessageNewParams{
 				Model: anthropic.F(model), MaxTokens: anthropic.F(int64(maxTokens)),
 				Messages: anthropic.F([]anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock(prompt))}),
@@ -43,7 +46,7 @@ func NewConfiguredNewsRanker(providerName, apiKey, model, baseURL string, fallba
 		}}, nil
 	case "openrouter":
 		models := append([]string{model}, fallbackModels...)
-		return &NewsRanker{complete: openRouterCompleter(apiKey, models, baseURL, timeout, maxTokens)}, nil
+		return &NewsRanker{complete: openRouterCompleter(apiKey, models, baseURL, timeout, maxTokens, log, "news_ranker")}, nil
 	default:
 		return nil, fmt.Errorf("unsupported NLU provider %q", providerName)
 	}
@@ -54,6 +57,10 @@ type rankedItem struct {
 	Link    string `json:"link"`
 	Title   string `json:"title"`
 	Summary string `json:"summary"`
+}
+
+type rankedItemsResponse struct {
+	Items []rankedItem `json:"items"`
 }
 
 // newsRankSummaryPreviewLen caps how much of each candidate's existing
@@ -76,11 +83,14 @@ func (r *NewsRanker) Rank(ctx context.Context, candidates []provider.NewsItem, t
 	if err != nil {
 		return nil, fmt.Errorf("news ranker: %w", err)
 	}
-	raw = extractJSONArray(raw)
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, fmt.Errorf("news ranker: empty model response")
+	}
 	raw = sanitizeJSONStrings(raw)
 
-	var picked []rankedItem
-	if err := json.Unmarshal([]byte(raw), &picked); err != nil {
+	picked, err := decodeRankedItems(raw)
+	if err != nil {
 		return nil, fmt.Errorf("news ranker: json unmarshal: %w (raw: %.200s)", err, raw)
 	}
 
@@ -122,8 +132,8 @@ func buildNewsRankPrompt(candidates []provider.NewsItem, topN int) string {
 - переведи заголовок на русский язык (если он уже на русском — оставь как есть, не меняя смысл);
 - напиши краткое саммари в 2-3 предложения на русском языке, по существу дела, без воды.
 
-Верни ТОЛЬКО JSON-массив (без markdown, без пояснений) вида:
-[{"link": "<ссылка из списка ниже>", "title": "<заголовок на русском>", "summary": "<саммари на русском>"}]
+Верни ТОЛЬКО JSON-объект (без markdown, без пояснений) вида:
+{"items":[{"link": "<ссылка из списка ниже>", "title": "<заголовок на русском>", "summary": "<саммари на русском>"}]}
 
 Список новостей:
 `, topN)
@@ -138,6 +148,26 @@ func buildNewsRankPrompt(candidates []provider.NewsItem, topN int) string {
 		}
 	}
 	return sb.String()
+}
+
+func decodeRankedItems(raw string) ([]rankedItem, error) {
+	raw = strings.TrimSpace(raw)
+	objectAt := strings.Index(raw, "{")
+	arrayAt := strings.Index(raw, "[")
+	if objectAt >= 0 && (arrayAt < 0 || objectAt < arrayAt) {
+		object := extractJSON(raw)
+		var resp rankedItemsResponse
+		if err := json.Unmarshal([]byte(object), &resp); err != nil {
+			return nil, err
+		}
+		return resp.Items, nil
+	}
+
+	var picked []rankedItem
+	if err := json.Unmarshal([]byte(extractJSONArray(raw)), &picked); err != nil {
+		return nil, err
+	}
+	return picked, nil
 }
 
 // extractJSONArray trims LLM chatter around a JSON array response, mirroring

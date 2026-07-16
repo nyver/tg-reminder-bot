@@ -143,6 +143,11 @@ Main YAML sections:
 - `scheduler` — background task intervals;
 - `server` — API port, worker ID, and log level.
 
+At `server.log_level: info`, LLM calls are logged with the component
+(`nlu_parser` or `news_ranker`), provider, selected model, and whether the
+request is using a fallback model. Prompts, responses, and API keys are not
+written to logs.
+
 The TV provider integrates with the
 [EPG Service API](https://epgservice.ru/en/docs/). It resolves the channel
 name via `/v1/index`, loads the weekly schedule from

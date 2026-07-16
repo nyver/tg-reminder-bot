@@ -126,4 +126,6 @@ server:
   # Worker ID used for the lease; an empty value is generated automatically.
   worker_id: ""
   # Allowed levels: debug, info, warn, error.
+  # At info level, LLM requests log provider/model and fallback selection,
+  # without logging prompts, responses, or API keys.
   log_level: info

@@ -36,6 +36,23 @@ func TestNewsRankerPicksAndSummarizesByLink(t *testing.T) {
 	}
 }
 
+func TestNewsRankerAcceptsItemsObject(t *testing.T) {
+	ranker := &NewsRanker{complete: func(context.Context, string) (string, error) {
+		return `{"items":[{"link":"https://example.com/1","title":"Заголовок","summary":"Саммари."}]}`, nil
+	}}
+	candidates := []provider.NewsItem{
+		{Title: "Original", Link: "https://example.com/1", Summary: "Old."},
+	}
+
+	out, err := ranker.Rank(context.Background(), candidates, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 1 || out[0].Title != "Заголовок" || out[0].Summary != "Саммари." {
+		t.Fatalf("out = %+v", out)
+	}
+}
+
 // TestNewsRankerTranslatesTitle verifies that a translated title returned by
 // the model overrides the candidate's original (e.g. English) title, the
 // same way a fresh summary does.
@@ -179,6 +196,21 @@ func TestNewsRankerErrorsOnMalformedJSON(t *testing.T) {
 
 	if _, err := ranker.Rank(context.Background(), candidates, 5); err == nil {
 		t.Fatal("expected error for malformed JSON response")
+	}
+}
+
+func TestNewsRankerErrorsOnEmptyResponse(t *testing.T) {
+	ranker := &NewsRanker{complete: func(context.Context, string) (string, error) {
+		return "  \n\t", nil
+	}}
+	candidates := []provider.NewsItem{{Title: "1", Link: "https://example.com/1"}}
+
+	_, err := ranker.Rank(context.Background(), candidates, 5)
+	if err == nil {
+		t.Fatal("expected error for empty response")
+	}
+	if !strings.Contains(err.Error(), "empty model response") {
+		t.Fatalf("err = %v, want empty model response", err)
 	}
 }
 

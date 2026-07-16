@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -48,17 +49,19 @@ func NewLLMParser(apiKey string, loc *time.Location) *LLMParser {
 }
 
 // NewConfiguredLLMParser creates an Anthropic or OpenRouter-backed parser.
-func NewConfiguredLLMParser(provider, apiKey, model, baseURL string, fallbackModels []string, timeout time.Duration, maxTokens int, loc *time.Location) (*LLMParser, error) {
+func NewConfiguredLLMParser(provider, apiKey, model, baseURL string, fallbackModels []string, timeout time.Duration, maxTokens int, loc *time.Location, logs ...*slog.Logger) (*LLMParser, error) {
 	if loc == nil {
 		loc = time.UTC
 	}
 	if maxTokens <= 0 {
 		maxTokens = 1024
 	}
+	log := optionalLogger(logs...)
 	switch provider {
 	case "claude":
 		client := anthropic.NewClient(option.WithAPIKey(apiKey))
 		return &LLMParser{model: model, loc: loc, complete: func(ctx context.Context, prompt string) (string, error) {
+			log.Info("llm request", "component", "nlu_parser", "provider", "claude", "model", model, "fallback", false)
 			msg, err := client.Messages.New(ctx, anthropic.MessageNewParams{
 				Model: anthropic.F(model), MaxTokens: anthropic.F(int64(maxTokens)),
 				Messages: anthropic.F([]anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock(prompt))}),
@@ -73,7 +76,7 @@ func NewConfiguredLLMParser(provider, apiKey, model, baseURL string, fallbackMod
 			return nil, fmt.Errorf("invalid OpenRouter base URL: %w", err)
 		}
 		models := append([]string{model}, fallbackModels...)
-		return &LLMParser{model: model, loc: loc, complete: openRouterCompleter(apiKey, models, baseURL, timeout, maxTokens)}, nil
+		return &LLMParser{model: model, loc: loc, complete: openRouterCompleter(apiKey, models, baseURL, timeout, maxTokens, log, "nlu_parser")}, nil
 	default:
 		return nil, fmt.Errorf("unsupported NLU provider %q", provider)
 	}
@@ -85,23 +88,42 @@ func NewConfiguredLLMParser(provider, apiKey, model, baseURL string, fallbackMod
 // up to maxServerRetries times with exponential back-off. Any other error
 // (auth, malformed request, etc.) applies to every model equally, so it
 // propagates immediately instead of cycling through the rest of the list.
-func openRouterCompleter(apiKey string, models []string, baseURL string, timeout time.Duration, maxTokens int) func(context.Context, string) (string, error) {
+func openRouterCompleter(apiKey string, models []string, baseURL string, timeout time.Duration, maxTokens int, log *slog.Logger, component string) func(context.Context, string) (string, error) {
 	const maxServerRetries = 2
 	if timeout <= 0 {
 		timeout = 60 * time.Second
+	}
+	if log == nil {
+		log = slog.Default()
 	}
 	client := &http.Client{Timeout: timeout}
 	endpoint := strings.TrimRight(baseURL, "/") + "/chat/completions"
 
 	return func(ctx context.Context, prompt string) (string, error) {
 		var lastErr error
-		for _, model := range models {
-			content, tryNextModel, err := callOpenRouterModel(ctx, client, endpoint, apiKey, model, prompt, maxTokens, maxServerRetries)
+		for i, model := range models {
+			log.Info("llm request",
+				"component", component,
+				"provider", "openrouter",
+				"model", model,
+				"fallback", i > 0,
+				"model_index", i,
+			)
+			content, tryNextModel, err := callOpenRouterModel(ctx, client, endpoint, apiKey, model, prompt, maxTokens, maxServerRetries, log, component)
 			if err == nil {
 				return content, nil
 			}
 			lastErr = err
 			if tryNextModel {
+				if i+1 < len(models) {
+					log.Info("llm fallback",
+						"component", component,
+						"provider", "openrouter",
+						"failed_model", model,
+						"next_model", models[i+1],
+						"err", err,
+					)
+				}
 				continue // this model specifically is unavailable — try the next one
 			}
 			return "", err // error applies regardless of model — propagate immediately
@@ -119,6 +141,8 @@ func callOpenRouterModel(
 	client *http.Client,
 	endpoint, apiKey, model, prompt string,
 	maxTokens, maxRetries int,
+	log *slog.Logger,
+	component string,
 ) (string, bool, error) {
 	payload := struct {
 		Model          string              `json:"model"`
@@ -149,7 +173,17 @@ func callOpenRouterModel(
 		if err != nil {
 			lastErr = err
 			if attempt < maxRetries {
-				if werr := waitForRetry(ctx, time.Duration(1<<attempt)*time.Second); werr != nil {
+				delay := time.Duration(1<<attempt) * time.Second
+				log.Info("llm retry",
+					"component", component,
+					"provider", "openrouter",
+					"model", model,
+					"attempt", attempt+1,
+					"next_attempt", attempt+2,
+					"delay", delay.String(),
+					"err", err,
+				)
+				if werr := waitForRetry(ctx, delay); werr != nil {
 					return "", false, werr
 				}
 			}
@@ -165,7 +199,9 @@ func callOpenRouterModel(
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			var result struct {
 				Choices []struct {
-					Message struct{ Content string `json:"content"` } `json:"message"`
+					Message struct {
+						Content string `json:"content"`
+					} `json:"message"`
 				} `json:"choices"`
 			}
 			if err := json.Unmarshal(data, &result); err != nil {
@@ -192,12 +228,28 @@ func callOpenRouterModel(
 			if ra, ok := retryAfter(resp.Header.Get("Retry-After")); ok {
 				delay = ra
 			}
+			log.Info("llm retry",
+				"component", component,
+				"provider", "openrouter",
+				"model", model,
+				"attempt", attempt+1,
+				"next_attempt", attempt+2,
+				"delay", delay.String(),
+				"err", lastErr,
+			)
 			if werr := waitForRetry(ctx, delay); werr != nil {
 				return "", false, werr
 			}
 		}
 	}
 	return "", false, lastErr
+}
+
+func optionalLogger(logs ...*slog.Logger) *slog.Logger {
+	if len(logs) > 0 && logs[0] != nil {
+		return logs[0]
+	}
+	return slog.Default()
 }
 
 // parseLeadTime parses lead_time strings from LLM output.
