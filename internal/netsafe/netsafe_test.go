@@ -68,6 +68,54 @@ func TestValidateURLRejectsRebindingToPrivateIP(t *testing.T) {
 	}
 }
 
+// TestDialFirstReachableSkipsUnreachableAddresses verifies that a resolved
+// address which fails to connect (e.g. an AAAA record with no IPv6 egress,
+// or one dead IP in a round-robin pool) doesn't sink the whole request: the
+// dialer must move on to the next resolved address instead of only trying
+// the first one and giving up.
+func TestDialFirstReachableSkipsUnreachableAddresses(t *testing.T) {
+	addrs := []net.IPAddr{
+		{IP: net.ParseIP("2001:db8::1")}, // simulates an unreachable IPv6 address
+		{IP: net.ParseIP("93.184.216.34")},
+	}
+	var tried []string
+	dial := func(_ context.Context, _, addr string) (net.Conn, error) {
+		tried = append(tried, addr)
+		if addr == "93.184.216.34:443" {
+			client, server := net.Pipe()
+			server.Close()
+			return client, nil
+		}
+		return nil, &net.OpError{Op: "dial", Err: net.UnknownNetworkError("unreachable")}
+	}
+
+	conn, err := dialFirstReachable(context.Background(), "tcp", addrs, "443", dial)
+	if err != nil {
+		t.Fatalf("expected fallback to the second address to succeed, got: %v", err)
+	}
+	conn.Close()
+	if len(tried) != 2 {
+		t.Fatalf("expected both addresses to be tried, got %v", tried)
+	}
+}
+
+// TestDialFirstReachableReturnsLastErrorWhenAllFail ensures a real error
+// surfaces (not a nil conn with nil err) when every resolved address is
+// unreachable.
+func TestDialFirstReachableReturnsLastErrorWhenAllFail(t *testing.T) {
+	addrs := []net.IPAddr{
+		{IP: net.ParseIP("2001:db8::1")},
+		{IP: net.ParseIP("2001:db8::2")},
+	}
+	dial := func(_ context.Context, _, _ string) (net.Conn, error) {
+		return nil, &net.OpError{Op: "dial", Err: net.UnknownNetworkError("unreachable")}
+	}
+
+	if _, err := dialFirstReachable(context.Background(), "tcp", addrs, "443", dial); err == nil {
+		t.Fatal("expected an error when every resolved address fails")
+	}
+}
+
 func TestIsPrivateHost(t *testing.T) {
 	tests := []struct {
 		host string

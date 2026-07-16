@@ -42,10 +42,16 @@ func SafeClient(timeout time.Duration) *http.Client {
 				return nil, fmt.Errorf("connection to private IP %s (->%s) blocked", host, a.IP)
 			}
 		}
-		// Connect directly to the first resolved IP so the OS cannot silently
-		// re-resolve the hostname to a different (private) address mid-flight.
+		// Connect to a specific resolved IP (never back through the hostname)
+		// so the OS cannot silently re-resolve it to a different (private)
+		// address mid-flight. Try every resolved address in order rather than
+		// only the first: hosts commonly resolve to multiple addresses (e.g.
+		// an AAAA record with no IPv6 egress from the container, or one dead
+		// IP in a round-robin pool), and hard-coding the first would hang the
+		// whole request until the outer client timeout even though another
+		// resolved address is perfectly reachable.
 		d := net.Dialer{}
-		return d.DialContext(ctx, network, net.JoinHostPort(addrs[0].IP.String(), port))
+		return dialFirstReachable(ctx, network, addrs, port, d.DialContext)
 	}
 	return &http.Client{
 		Timeout: timeout,
@@ -54,6 +60,24 @@ func SafeClient(timeout time.Duration) *http.Client {
 			IdleConnTimeout: 30 * time.Second,
 		},
 	}
+}
+
+// dialFirstReachable tries every address in addrs, in order, returning the
+// first successful connection. All addresses have already passed the
+// private-IP check by the time this runs; this only handles the case where a
+// resolved address is otherwise unreachable (dead, wrong address family,
+// etc.). The dial parameter is injected so tests can exercise the fallback
+// without opening real sockets.
+func dialFirstReachable(ctx context.Context, network string, addrs []net.IPAddr, port string, dial func(ctx context.Context, network, addr string) (net.Conn, error)) (net.Conn, error) {
+	var lastErr error
+	for _, a := range addrs {
+		conn, err := dial(ctx, network, net.JoinHostPort(a.IP.String(), port))
+		if err == nil {
+			return conn, nil
+		}
+		lastErr = err
+	}
+	return nil, lastErr
 }
 
 // ValidateURL rejects unsupported schemes and obviously-private hosts before
