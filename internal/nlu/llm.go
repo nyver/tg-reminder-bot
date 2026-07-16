@@ -79,9 +79,12 @@ func NewConfiguredLLMParser(provider, apiKey, model, baseURL string, fallbackMod
 	}
 }
 
-// openRouterCompleter returns a completion function that tries models in order.
-// On HTTP 429 it immediately moves to the next model; on 5xx it retries the
-// same model up to maxServerRetries times with exponential back-off.
+// openRouterCompleter returns a completion function that tries models in
+// order. On HTTP 429 (rate limited) or 404 (model slug retired/unavailable)
+// it immediately moves to the next model; on 5xx it retries the same model
+// up to maxServerRetries times with exponential back-off. Any other error
+// (auth, malformed request, etc.) applies to every model equally, so it
+// propagates immediately instead of cycling through the rest of the list.
 func openRouterCompleter(apiKey string, models []string, baseURL string, timeout time.Duration, maxTokens int) func(context.Context, string) (string, error) {
 	const maxServerRetries = 2
 	if timeout <= 0 {
@@ -93,22 +96,24 @@ func openRouterCompleter(apiKey string, models []string, baseURL string, timeout
 	return func(ctx context.Context, prompt string) (string, error) {
 		var lastErr error
 		for _, model := range models {
-			content, rateLimited, err := callOpenRouterModel(ctx, client, endpoint, apiKey, model, prompt, maxTokens, maxServerRetries)
+			content, tryNextModel, err := callOpenRouterModel(ctx, client, endpoint, apiKey, model, prompt, maxTokens, maxServerRetries)
 			if err == nil {
 				return content, nil
 			}
 			lastErr = err
-			if rateLimited {
-				continue // try next fallback model
+			if tryNextModel {
+				continue // this model specifically is unavailable — try the next one
 			}
-			return "", err // non-429 error — propagate immediately
+			return "", err // error applies regardless of model — propagate immediately
 		}
 		return "", lastErr
 	}
 }
 
 // callOpenRouterModel calls one specific model, retrying on 5xx.
-// Returns (content, rateLimited=true, nil) on 429 so the caller can fall back.
+// Returns (content, tryNextModel=true, nil) on 429 (rate limited) or 404
+// (model slug retired/unavailable) so the caller can fall back to the next
+// configured model.
 func callOpenRouterModel(
 	ctx context.Context,
 	client *http.Client,
@@ -174,11 +179,11 @@ func callOpenRouterModel(
 
 		lastErr = fmt.Errorf("OpenRouter HTTP %d (model %s): %.300s", resp.StatusCode, model, data)
 
-		if resp.StatusCode == http.StatusTooManyRequests {
-			return "", true, lastErr // signal caller to try next model
+		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusNotFound {
+			return "", true, lastErr // rate limited, or this model slug is gone — try the next model
 		}
 		if resp.StatusCode < 500 {
-			return "", false, lastErr // 4xx (not 429) — no point retrying
+			return "", false, lastErr // other 4xx (auth, bad request, ...) — applies to every model, no point retrying
 		}
 
 		// 5xx — retry with back-off

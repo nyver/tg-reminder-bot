@@ -66,6 +66,55 @@ func TestOpenRouterParser_fallbackOn429(t *testing.T) {
 	}
 }
 
+// TestOpenRouterParser_fallbackOn404 verifies that a 404 from the primary
+// model (e.g. a free model slug that OpenRouter has retired) causes an
+// immediate switch to the fallback model, the same as a 429 does.
+func TestOpenRouterParser_fallbackOn404(t *testing.T) {
+	t.Parallel()
+	var requests atomic.Int32
+
+	const primaryModel = "primary/model:free"
+	const fallbackModel = "fallback/model"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		idx := requests.Add(1)
+		var req struct {
+			Model string `json:"model"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode body: %v", err)
+		}
+		if idx == 1 {
+			if req.Model != primaryModel {
+				t.Errorf("request 1 model = %q, want %q", req.Model, primaryModel)
+			}
+			http.Error(w, `{"error":{"message":"This model is unavailable for free","code":404}}`, http.StatusNotFound)
+			return
+		}
+		if req.Model != fallbackModel {
+			t.Errorf("request 2 model = %q, want %q", req.Model, fallbackModel)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"kind\":\"absolute\",\"message\":\"test\",\"confidence\":0.95}"}}]}`))
+	}))
+	defer server.Close()
+
+	parser, err := NewConfiguredLLMParser("openrouter", "test-key", primaryModel, server.URL, []string{fallbackModel}, 0, 0, time.UTC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := parser.Parse(context.Background(), "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Confidence != 0.95 {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+	if n := requests.Load(); n != 2 {
+		t.Fatalf("total requests = %d, want 2", n)
+	}
+}
+
 // TestOpenRouterParser_allModelsRateLimited verifies that if every model returns
 // 429, the error is propagated to the caller.
 func TestOpenRouterParser_allModelsRateLimited(t *testing.T) {
