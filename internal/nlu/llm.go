@@ -133,9 +133,9 @@ func openRouterCompleter(apiKey string, models []string, baseURL string, timeout
 }
 
 // callOpenRouterModel calls one specific model, retrying on 5xx.
-// Returns (content, tryNextModel=true, nil) on 429 (rate limited) or 404
-// (model slug retired/unavailable) so the caller can fall back to the next
-// configured model.
+// Returns (content, tryNextModel=true, nil) on model-specific failures
+// (rate limit, unavailable slug, or an empty successful response) so the
+// caller can fall back to the next configured model.
 func callOpenRouterModel(
 	ctx context.Context,
 	client *http.Client,
@@ -210,7 +210,11 @@ func callOpenRouterModel(
 			if len(result.Choices) == 0 {
 				return "", false, fmt.Errorf("OpenRouter: no choices for model %s", model)
 			}
-			return result.Choices[0].Message.Content, false, nil
+			content := result.Choices[0].Message.Content
+			if strings.TrimSpace(content) == "" {
+				return "", true, fmt.Errorf("OpenRouter: empty content for model %s", model)
+			}
+			return content, false, nil
 		}
 
 		lastErr = fmt.Errorf("OpenRouter HTTP %d (model %s): %.300s", resp.StatusCode, model, data)
