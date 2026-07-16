@@ -33,7 +33,7 @@ volume.
 | `/tz <zone>` | set the timezone in IANA format, e.g. `Europe/Moscow` |
 | `/tv <program>` | find a program on any channel over the next week |
 | `/tv <program> \| <channel>` | find a program on a specific channel over the next week |
-| `/rss <url>` | subscribe to a periodic RSS/Atom news digest, delivered daily at 09:00 (top 5) |
+| `/rss <url>` | subscribe to a periodic RSS/Atom news digest, delivered daily at 09:00 (top 10) |
 | `/rss <url> \| HH:MM` | same, with a custom delivery time |
 | `/rss <url> \| HH:MM \| N` | same, with a custom delivery time and item count (1–20) |
 
@@ -336,7 +336,7 @@ digest, delivered once a day at a chosen time. The simplest way is the
 dedicated command:
 
 ```text
-/rss https://lenta.ru/rss                       → daily digest at 09:00, top 5
+/rss https://lenta.ru/rss                       → daily digest at 09:00, top 10
 /rss https://lenta.ru/rss | 08:30                → custom delivery time
 /rss https://lenta.ru/rss | 08:30 | 10           → custom time and top-10 items
 ```
@@ -365,7 +365,7 @@ feed links with a digest request and a time:
 ```
 
 If no time is given, the digest defaults to 09:00; if no item count is
-given, it defaults to top 5. `/list`, `/pause`, `/resume`, `/cancel`, and
+given, it defaults to top 10. `/list`, `/pause`, `/resume`, `/cancel`, and
 `/remove` manage an RSS digest reminder the same way as any other
 conditional reminder.
 

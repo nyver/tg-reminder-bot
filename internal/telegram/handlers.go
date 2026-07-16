@@ -645,7 +645,7 @@ func writeTVShows(sb *strings.Builder, shows []provider.TVShowtime, fallbackChan
 const (
 	rssDefaultCronHour   = 9
 	rssDefaultCronMinute = 0
-	rssDefaultTopN       = 5
+	rssDefaultTopN       = 10
 	rssMinTopN           = 1
 	rssMaxTopN           = 20
 	// rssMaxURLs bounds how many feeds one /rss reminder can combine. Matches
@@ -659,7 +659,7 @@ func (h *Handler) handleRSS(c tele.Context) error {
 	if args == "" {
 		return c.Send(
 			"Использование:\n"+
-				"`/rss https://example.com/feed.xml` — дайджест важных новостей ежедневно в 09:00 (топ-5)\n"+
+				"`/rss https://example.com/feed.xml` — дайджест важных новостей ежедневно в 09:00 (топ-10)\n"+
 				"`/rss https://a.com/feed.xml,https://b.com/feed.xml` — общий дайджест по нескольким лентам\n"+
 				"`/rss https://example.com/feed.xml | 08:30` — своё время рассылки\n"+
 				"`/rss https://example.com/feed.xml | 08:30 | 10` — своё время и число новостей (1–20)",
@@ -1538,7 +1538,7 @@ const msgHelp = `*Команды:*
 /tv <программа> | <канал> — расписание на конкретном канале
 /tv | <канал> — программа канала на сегодня
 /tv | <канал> 25\.06 — программа канала на дату
-/rss <ссылка> — дайджест важных новостей ежедневно в 09:00 (топ\-5)
+/rss <ссылка> — дайджест важных новостей ежедневно в 09:00 (топ\-10)
 /rss <ссылка1>,<ссылка2> — общий дайджест по нескольким лентам
 /rss <ссылка> | ЧЧ:ММ — своё время рассылки
 /rss <ссылка> | ЧЧ:ММ | N — своё время и число новостей \(1\-20\)

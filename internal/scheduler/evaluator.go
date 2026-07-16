@@ -339,7 +339,7 @@ func (e *Evaluator) evaluateNewsDigest(ctx context.Context, r domain.Reminder) (
 		return nil, nil
 	}
 
-	topN := orDefault(r.Spec.TopN, 5)
+	topN := orDefault(r.Spec.TopN, 10)
 	items = e.rankNews(ctx, r, items, topN)
 	if len(items) > topN {
 		items = items[:topN]
