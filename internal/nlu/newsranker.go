@@ -52,6 +52,7 @@ func NewConfiguredNewsRanker(providerName, apiKey, model, baseURL string, fallba
 // rankedItem is the shape the LLM is asked to return for each selected item.
 type rankedItem struct {
 	Link    string `json:"link"`
+	Title   string `json:"title"`
 	Summary string `json:"summary"`
 }
 
@@ -61,10 +62,11 @@ type rankedItem struct {
 const newsRankSummaryPreviewLen = 300
 
 // Rank asks the LLM to choose the most important items among candidates
-// (already pre-filtered by the heuristic) and to write a fresh summary for
-// each, returning at most topN items ordered by importance. Items are
-// matched back to candidates by Link, so a hallucinated or unrecognized link
-// in the model's response is dropped rather than guessed at.
+// (already pre-filtered by the heuristic), translate each selected item's
+// title into Russian and write a fresh Russian summary for it, returning at
+// most topN items ordered by importance. Items are matched back to
+// candidates by Link, so a hallucinated or unrecognized link in the model's
+// response is dropped rather than guessed at.
 func (r *NewsRanker) Rank(ctx context.Context, candidates []provider.NewsItem, topN int) ([]provider.NewsItem, error) {
 	if len(candidates) == 0 || topN <= 0 {
 		return nil, nil
@@ -75,6 +77,7 @@ func (r *NewsRanker) Rank(ctx context.Context, candidates []provider.NewsItem, t
 		return nil, fmt.Errorf("news ranker: %w", err)
 	}
 	raw = extractJSONArray(raw)
+	raw = sanitizeJSONStrings(raw)
 
 	var picked []rankedItem
 	if err := json.Unmarshal([]byte(raw), &picked); err != nil {
@@ -94,6 +97,9 @@ func (r *NewsRanker) Rank(ctx context.Context, candidates []provider.NewsItem, t
 		if !ok {
 			continue
 		}
+		if t := strings.TrimSpace(p.Title); t != "" {
+			it.Title = t
+		}
 		if s := strings.TrimSpace(p.Summary); s != "" {
 			it.Summary = s
 		}
@@ -110,12 +116,14 @@ func (r *NewsRanker) Rank(ctx context.Context, candidates []provider.NewsItem, t
 
 func buildNewsRankPrompt(candidates []provider.NewsItem, topN int) string {
 	var sb strings.Builder
-	fmt.Fprintf(&sb, `Ты — редактор новостного дайджеста. Тебе передан список новостей одной RSS/Atom-ленты.
+	fmt.Fprintf(&sb, `Ты — редактор новостного дайджеста. Тебе передан список новостей одной RSS/Atom-ленты — заголовки и описания могут быть на любом языке.
 
-Выбери не более %d самых важных новостей (крупные события, серьёзные последствия, широкий охват), отсортируй по убыванию важности. Для каждой выбранной новости напиши краткое саммари в 2-3 предложения на русском языке, по существу дела, без воды.
+Выбери не более %d самых важных новостей (крупные события, серьёзные последствия, широкий охват), отсортируй по убыванию важности. Для каждой выбранной новости:
+- переведи заголовок на русский язык (если он уже на русском — оставь как есть, не меняя смысл);
+- напиши краткое саммари в 2-3 предложения на русском языке, по существу дела, без воды.
 
 Верни ТОЛЬКО JSON-массив (без markdown, без пояснений) вида:
-[{"link": "<ссылка из списка ниже>", "summary": "<саммари>"}]
+[{"link": "<ссылка из списка ниже>", "title": "<заголовок на русском>", "summary": "<саммари на русском>"}]
 
 Список новостей:
 `, topN)
@@ -143,4 +151,53 @@ func extractJSONArray(s string) string {
 		s = s[:i+1]
 	}
 	return s
+}
+
+// sanitizeJSONStrings escapes raw control characters (tab, newline, carriage
+// return, and other C0 controls) that appear inside JSON string literals.
+// Models frequently emit a literal newline/tab in a multi-sentence summary
+// instead of the required "\n"/"\t" escape sequence, which makes the
+// response invalid JSON per spec even though everything else about it is
+// well-formed. Fixing that up here avoids discarding an otherwise-good
+// response and falling back to the heuristic ranking unnecessarily.
+func sanitizeJSONStrings(s string) string {
+	var sb strings.Builder
+	sb.Grow(len(s))
+	inString := false
+	escaped := false
+	for _, r := range s {
+		if !inString {
+			if r == '"' {
+				inString = true
+			}
+			sb.WriteRune(r)
+			continue
+		}
+		if escaped {
+			sb.WriteRune(r)
+			escaped = false
+			continue
+		}
+		switch r {
+		case '\\':
+			escaped = true
+			sb.WriteRune(r)
+		case '"':
+			inString = false
+			sb.WriteRune(r)
+		case '\t':
+			sb.WriteString(`\t`)
+		case '\n':
+			sb.WriteString(`\n`)
+		case '\r':
+			sb.WriteString(`\r`)
+		default:
+			if r < 0x20 {
+				fmt.Fprintf(&sb, `\u%04x`, r)
+			} else {
+				sb.WriteRune(r)
+			}
+		}
+	}
+	return sb.String()
 }

@@ -341,13 +341,27 @@ dedicated command:
 /rss https://lenta.ru/rss | 08:30 | 10           → custom time and top-10 items
 ```
 
+A single reminder can also combine several feeds into one digest — separate
+the URLs with a comma:
+
+```text
+/rss https://lenta.ru/rss,https://habr.com/rss | 08:30 | 10
+```
+
+Items from every feed are merged, deduplicated, and ranked together into one
+shared top-N — not a separate top-N per feed. A digest can combine up to 10
+feeds; feeds are fetched concurrently, and if one of them fails or times out
+the others still make it into the digest (only when *every* feed fails does
+the tick produce no digest, retried on the next one).
+
 The same reminder can also be created from a plain-text message, without
-using the command — the NLU recognizes phrases that combine a feed link with
-a digest request and a time:
+using the command — the NLU recognizes phrases that combine one or more
+feed links with a digest request and a time:
 
 ```text
 каждый день в 18:00 создай дайджест новостей на основе https://lenta.ru/rss
 дайджест новостей топ 10 по ленте https://lenta.ru/rss в 8 утра
+дайджест по лентам https://lenta.ru/rss и https://habr.com/rss в 8 утра
 ```
 
 If no time is given, the digest defaults to 09:00; if no item count is
@@ -379,17 +393,37 @@ sorted by score, descending.
 Optionally, the LLM configured under `nlu:` can take over ranking and
 summarization instead: enable `providers.rss.llm_digest: true` and, on each
 digest tick, the heuristic's top candidates (up to 3× the digest's item
-count) are handed to the LLM, which picks the genuinely most important ones
-and writes a fresh 2–3 sentence summary for each. This is off by default
-because it adds one LLM call per digest tick; if that call fails or is
-unavailable, the digest silently falls back to the heuristic ranking instead
-of failing outright.
+count) are handed to the LLM, which picks the genuinely most important ones,
+translates each selected title into Russian (feeds are often in other
+languages, e.g. English-language tech news), and writes a fresh 2–3 sentence
+Russian summary. This is off by default because it adds one LLM call per
+digest tick; if that call fails or is unavailable, the digest silently falls
+back to the heuristic ranking (with titles/summaries in the feed's original
+language) instead of failing outright.
 
 ```yaml
 providers:
   rss:
     llm_digest: true
 ```
+
+### Formatting
+
+Each digest item's title is a clickable link to the article (MarkdownV2),
+with the publish date in italics next to it, instead of showing the raw URL
+on its own line:
+
+```
+1. [Title of the article](https://example.com/article) · 16.07 10:00
+   Summary in two or three sentences.
+```
+
+All feed-controlled text (title, summary) is escaped before being embedded
+in the MarkdownV2 message, so untrusted content from the feed can never
+break the message's formatting or inject unintended links/entities. Every
+other notification kind (price drops, TV reminders, plain reminders) is
+still sent as plain text, unaffected by this — only digest messages opt
+into MarkdownV2 rendering.
 
 ### SSRF protection
 

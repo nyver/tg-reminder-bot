@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/nyver2k/remindertgbot/internal/netsafe"
@@ -22,12 +23,19 @@ import (
 const (
 	providerType = "rss"
 	maxFeedBody  = 5 << 20 // 5 MB is enough for any news feed
+	// maxFeedURLs bounds how many feeds a single digest can combine, so a
+	// pathological reminder can't fan out into dozens of concurrent fetches.
+	maxFeedURLs = 10
 )
 
 // Provider implements provider.NewsProvider for RSS 2.0 and Atom feeds.
 type Provider struct {
 	httpClient *http.Client
 	log        *slog.Logger
+	// fetchOne is overridden in tests to avoid depending on real HTTP/DNS
+	// and netsafe's private-IP guard (which would reject a local test
+	// server); defaults to p.fetchAndParse.
+	fetchOne func(ctx context.Context, feedURL string) ([]provider.NewsItem, error)
 }
 
 // New builds a Provider. proxyURL is optional: some feeds block requests
@@ -47,21 +55,87 @@ func New(timeout time.Duration, proxyURL string, log *slog.Logger) (*Provider, e
 	if proxyURL != "" {
 		log.Info("rss: proxy configured")
 	}
-	return &Provider{
+	p := &Provider{
 		httpClient: client,
 		log:        log,
-	}, nil
+	}
+	p.fetchOne = p.fetchAndParse
+	return p, nil
 }
 
 func (p *Provider) Type() string { return providerType }
 
+// Fetch fetches one or more feeds — q.Params["url"] is a single URL, or
+// several comma-separated URLs for a digest that combines multiple lentas
+// into one ranked list. Feeds are fetched concurrently so one slow/blocked
+// feed doesn't multiply the total wait by the number of feeds. A feed that
+// fails to fetch or parse is logged and skipped rather than failing the
+// whole digest — only when every feed fails does Fetch return an error.
 func (p *Provider) Fetch(ctx context.Context, q provider.Query) ([]provider.NewsItem, error) {
-	feedURL := strings.TrimSpace(q.Params["url"])
-	if feedURL == "" {
+	urls := parseFeedURLs(q.Params["url"])
+	if len(urls) == 0 {
 		return nil, fmt.Errorf("rss provider: url param required")
 	}
-	// SSRF guard: reject unsupported schemes and private/loopback/link-local
-	// hosts before making any request with a user-supplied URL.
+	if len(urls) > maxFeedURLs {
+		return nil, fmt.Errorf("rss provider: too many feed URLs (%d, max %d)", len(urls), maxFeedURLs)
+	}
+
+	type result struct {
+		items []provider.NewsItem
+		err   error
+	}
+	results := make([]result, len(urls))
+	var wg sync.WaitGroup
+	for i, u := range urls {
+		wg.Add(1)
+		go func(i int, feedURL string) {
+			defer wg.Done()
+			items, err := p.fetchOne(ctx, feedURL)
+			results[i] = result{items: items, err: err}
+		}(i, u)
+	}
+	wg.Wait()
+
+	var allItems []provider.NewsItem
+	var lastErr error
+	failCount := 0
+	for i, r := range results {
+		if r.err != nil {
+			failCount++
+			lastErr = r.err
+			p.log.Warn("rss provider: feed fetch failed, skipping", "url", urls[i], "err", r.err)
+			continue
+		}
+		allItems = append(allItems, r.items...)
+	}
+	if failCount == len(urls) {
+		return nil, fmt.Errorf("rss provider: all %d feed(s) failed, e.g. %w", len(urls), lastErr)
+	}
+
+	now := time.Now()
+	for i := range allItems {
+		allItems[i].Score = scoreItem(allItems[i], now)
+	}
+	return dedupAndSort(allItems), nil
+}
+
+// parseFeedURLs splits a comma-separated url param into individual feed
+// URLs, trimming whitespace and dropping empty entries.
+func parseFeedURLs(raw string) []string {
+	parts := strings.Split(raw, ",")
+	urls := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if u := strings.TrimSpace(part); u != "" {
+			urls = append(urls, u)
+		}
+	}
+	return urls
+}
+
+// fetchAndParse fetches and parses a single feed. SSRF guard: reject
+// unsupported schemes and private/loopback/link-local hosts before making
+// any request with a user-supplied URL.
+func (p *Provider) fetchAndParse(ctx context.Context, feedURL string) ([]provider.NewsItem, error) {
 	if err := netsafe.ValidateURL(ctx, feedURL); err != nil {
 		return nil, fmt.Errorf("rss provider: %w", err)
 	}
@@ -75,12 +149,7 @@ func (p *Provider) Fetch(ctx context.Context, q provider.Query) ([]provider.News
 	if err != nil {
 		return nil, fmt.Errorf("rss provider: %w", err)
 	}
-
-	now := time.Now()
-	for i := range items {
-		items[i].Score = scoreItem(items[i], now)
-	}
-	return dedupAndSort(items), nil
+	return items, nil
 }
 
 func (p *Provider) fetch(ctx context.Context, feedURL string) ([]byte, error) {

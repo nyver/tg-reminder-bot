@@ -211,8 +211,15 @@ func TestNewsDigestHappyPath(t *testing.T) {
 	if len(planned) != 1 {
 		t.Fatalf("want 1 notification, got %d: %+v", len(planned), planned)
 	}
-	if !strings.Contains(planned[0].Text, "Новость 1") || !strings.Contains(planned[0].Text, "Саммари 1.") {
-		t.Fatalf("digest text missing expected content: %s", planned[0].Text)
+	text := planned[0].Text
+	if !strings.HasPrefix(text, MarkdownV2Prefix) {
+		t.Fatalf("digest text should carry the MarkdownV2Prefix marker: %q", text)
+	}
+	if !strings.Contains(text, "*[Новость 1](https://example.com/1)*") {
+		t.Fatalf("digest text should hyperlink the title, got: %s", text)
+	}
+	if !strings.Contains(text, "Саммари 1\\.") {
+		t.Fatalf("digest text missing escaped summary: %s", text)
 	}
 	if len(hist.saved) != 1 {
 		t.Fatalf("expected 1 observation saved, got %d", len(hist.saved))
@@ -288,7 +295,7 @@ func TestNewsDigestUsesLLMRankerWhenConfigured(t *testing.T) {
 	if len(planned) != 1 {
 		t.Fatalf("want 1 notification, got %d: %+v", len(planned), planned)
 	}
-	if !strings.Contains(planned[0].Text, "LLM-саммари 2.") {
+	if !strings.Contains(planned[0].Text, mdv2Escape("LLM-саммари 2.")) {
 		t.Fatalf("digest text should use the ranker's summary, got: %s", planned[0].Text)
 	}
 	if strings.Contains(planned[0].Text, "Новость 1") {
@@ -318,8 +325,56 @@ func TestNewsDigestFallsBackToHeuristicOnRankerError(t *testing.T) {
 	if len(planned) != 1 {
 		t.Fatalf("want 1 notification (heuristic fallback), got %d: %+v", len(planned), planned)
 	}
-	if !strings.Contains(planned[0].Text, "Новость 1") || !strings.Contains(planned[0].Text, "Саммари 1.") {
+	if !strings.Contains(planned[0].Text, "Новость 1") || !strings.Contains(planned[0].Text, mdv2Escape("Саммари 1.")) {
 		t.Fatalf("digest text missing heuristic content: %s", planned[0].Text)
+	}
+}
+
+// TestRenderNewsDigestEscapesAndLinksTitles verifies that renderNewsDigest
+// produces MarkdownV2 with the marker prefix, a clickable title per item,
+// and that MarkdownV2-special characters in feed-controlled text (title,
+// summary) are escaped so they can't break the message's formatting.
+func TestRenderNewsDigestEscapesAndLinksTitles(t *testing.T) {
+	spec := domain.Spec{Event: domain.EventSpec{Title: "lenta.ru"}}
+	items := []provider.NewsItem{
+		{
+			Title:       "OnePlus quits (for now) - report",
+			Link:        "https://example.com/news?a=1&b=2",
+			Summary:     "Цена выросла на 10.5%!",
+			PublishedAt: time.Date(2026, 7, 16, 10, 0, 0, 0, time.UTC),
+		},
+	}
+
+	text := renderNewsDigest(spec, items)
+
+	if !strings.HasPrefix(text, MarkdownV2Prefix) {
+		t.Fatalf("expected text to start with MarkdownV2Prefix, got: %q", text)
+	}
+	body := strings.TrimPrefix(text, MarkdownV2Prefix)
+
+	wantLink := "*[OnePlus quits \\(for now\\) \\- report](https://example.com/news?a=1&b=2)*"
+	if !strings.Contains(body, wantLink) {
+		t.Fatalf("expected escaped hyperlinked title %q in: %s", wantLink, body)
+	}
+	if !strings.Contains(body, "Цена выросла на 10\\.5%\\!") {
+		t.Fatalf("expected escaped summary in: %s", body)
+	}
+	if strings.Contains(body, "example.com/news?a=1&b=2\n") {
+		t.Fatalf("raw URL should not appear on its own line anymore: %s", body)
+	}
+}
+
+// TestRenderNewsDigestEscapesURLParens verifies that a feed URL containing a
+// closing paren doesn't prematurely terminate the MarkdownV2 link syntax.
+func TestRenderNewsDigestEscapesURLParens(t *testing.T) {
+	spec := domain.Spec{}
+	items := []provider.NewsItem{
+		{Title: "Title", Link: "https://example.com/wiki/Foo_(bar)"},
+	}
+
+	text := renderNewsDigest(spec, items)
+	if !strings.Contains(text, "(https://example.com/wiki/Foo_(bar\\))") {
+		t.Fatalf("expected escaped closing paren in link URL, got: %s", text)
 	}
 }
 

@@ -8,6 +8,8 @@ import (
 	"github.com/nyver2k/remindertgbot/internal/domain"
 	"github.com/nyver2k/remindertgbot/internal/nlu"
 	"github.com/nyver2k/remindertgbot/internal/provider"
+	"github.com/nyver2k/remindertgbot/internal/scheduler"
+	tele "gopkg.in/telebot.v3"
 )
 
 func TestWriteTVShowsGroupsByChannelAndDay(t *testing.T) {
@@ -223,6 +225,27 @@ func TestHandleTVArgParsing(t *testing.T) {
 	}
 }
 
+func TestStripMarkdownV2DetectsMarker(t *testing.T) {
+	text, opts := stripMarkdownV2(scheduler.MarkdownV2Prefix + "*bold*")
+	if text != "*bold*" {
+		t.Fatalf("text = %q, want marker stripped", text)
+	}
+	if len(opts) != 1 || opts[0] != tele.ModeMarkdownV2 {
+		t.Fatalf("opts = %+v, want [tele.ModeMarkdownV2]", opts)
+	}
+}
+
+func TestStripMarkdownV2LeavesPlainTextUnchanged(t *testing.T) {
+	const plain = "just a plain reminder text"
+	text, opts := stripMarkdownV2(plain)
+	if text != plain {
+		t.Fatalf("text = %q, want unchanged", text)
+	}
+	if opts != nil {
+		t.Fatalf("opts = %+v, want nil for plain text", opts)
+	}
+}
+
 func TestValidateParseResultRejectsEmptySpec(t *testing.T) {
 	if err := validateParseResult(&nlu.ParseResult{Spec: &domain.Spec{}}); err == nil {
 		t.Fatal("expected validation error")
@@ -310,12 +333,12 @@ func TestBuildAbsoluteNonAnchorReminderPreservesFireAt(t *testing.T) {
 }
 
 func TestParseRSSArgsDefaults(t *testing.T) {
-	feedURL, hour, minute, topN, err := parseRSSArgs("https://lenta.ru/rss")
+	feedURLs, hour, minute, topN, err := parseRSSArgs("https://lenta.ru/rss")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if feedURL != "https://lenta.ru/rss" {
-		t.Errorf("feedURL = %q", feedURL)
+	if len(feedURLs) != 1 || feedURLs[0] != "https://lenta.ru/rss" {
+		t.Errorf("feedURLs = %v", feedURLs)
 	}
 	if hour != rssDefaultCronHour || minute != rssDefaultCronMinute {
 		t.Errorf("time = %02d:%02d, want default %02d:%02d", hour, minute, rssDefaultCronHour, rssDefaultCronMinute)
@@ -326,12 +349,57 @@ func TestParseRSSArgsDefaults(t *testing.T) {
 }
 
 func TestParseRSSArgsCustomTimeAndTopN(t *testing.T) {
-	feedURL, hour, minute, topN, err := parseRSSArgs("https://lenta.ru/rss | 08:30 | 10")
+	feedURLs, hour, minute, topN, err := parseRSSArgs("https://lenta.ru/rss | 08:30 | 10")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if feedURL != "https://lenta.ru/rss" || hour != 8 || minute != 30 || topN != 10 {
-		t.Errorf("got url=%q hour=%d minute=%d topN=%d", feedURL, hour, minute, topN)
+	if len(feedURLs) != 1 || feedURLs[0] != "https://lenta.ru/rss" || hour != 8 || minute != 30 || topN != 10 {
+		t.Errorf("got urls=%v hour=%d minute=%d topN=%d", feedURLs, hour, minute, topN)
+	}
+}
+
+// TestParseRSSArgsMultipleURLs verifies that a comma-separated list of feed
+// URLs in the first pipe-segment produces a combined digest reminder.
+func TestParseRSSArgsMultipleURLs(t *testing.T) {
+	feedURLs, _, _, _, err := parseRSSArgs("https://lenta.ru/rss, https://habr.com/rss |09:30")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := []string{"https://lenta.ru/rss", "https://habr.com/rss"}
+	if len(feedURLs) != len(want) || feedURLs[0] != want[0] || feedURLs[1] != want[1] {
+		t.Errorf("feedURLs = %v, want %v", feedURLs, want)
+	}
+}
+
+func TestParseRSSArgsRejectsTooManyURLs(t *testing.T) {
+	var sb strings.Builder
+	for i := 0; i < rssMaxURLs+1; i++ {
+		if i > 0 {
+			sb.WriteByte(',')
+		}
+		sb.WriteString("https://example.com/feed")
+	}
+	if _, _, _, _, err := parseRSSArgs(sb.String()); err == nil {
+		t.Error("expected error for more than rssMaxURLs feeds")
+	}
+}
+
+func TestFeedHostsDisplay(t *testing.T) {
+	cases := []struct {
+		urls []string
+		want string
+	}{
+		{[]string{"https://www.lenta.ru/rss"}, "lenta.ru"},
+		{[]string{"https://lenta.ru/rss", "https://habr.com/rss"}, "lenta.ru, habr.com"},
+		{
+			[]string{"https://a.com/rss", "https://b.com/rss", "https://c.com/rss", "https://d.com/rss"},
+			"a.com, b.com, c.com +1 ещё",
+		},
+	}
+	for _, tc := range cases {
+		if got := feedHostsDisplay(tc.urls); got != tc.want {
+			t.Errorf("feedHostsDisplay(%v) = %q, want %q", tc.urls, got, tc.want)
+		}
 	}
 }
 

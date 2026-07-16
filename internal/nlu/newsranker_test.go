@@ -2,6 +2,8 @@ package nlu
 
 import (
 	"context"
+	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/nyver2k/remindertgbot/internal/provider"
@@ -31,6 +33,51 @@ func TestNewsRankerPicksAndSummarizesByLink(t *testing.T) {
 	}
 	if out[1].Link != "https://example.com/1" || out[1].Summary != "Свежее саммари 1." {
 		t.Fatalf("out[1] = %+v", out[1])
+	}
+}
+
+// TestNewsRankerTranslatesTitle verifies that a translated title returned by
+// the model overrides the candidate's original (e.g. English) title, the
+// same way a fresh summary does.
+func TestNewsRankerTranslatesTitle(t *testing.T) {
+	ranker := &NewsRanker{complete: func(context.Context, string) (string, error) {
+		return `[{"link":"https://example.com/1","title":"Заголовок на русском","summary":"Саммари на русском."}]`, nil
+	}}
+	candidates := []provider.NewsItem{
+		{Title: "Original English Title", Link: "https://example.com/1", Summary: "Original English summary."},
+	}
+
+	out, err := ranker.Rank(context.Background(), candidates, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 1 {
+		t.Fatalf("len(out) = %d, want 1", len(out))
+	}
+	if out[0].Title != "Заголовок на русском" {
+		t.Fatalf("title = %q, want translated title", out[0].Title)
+	}
+	if out[0].Summary != "Саммари на русском." {
+		t.Fatalf("summary = %q, want translated summary", out[0].Summary)
+	}
+}
+
+// TestNewsRankerKeepsOriginalTitleWhenModelOmitsIt ensures a missing/empty
+// title in the model's response doesn't blank out the original.
+func TestNewsRankerKeepsOriginalTitleWhenModelOmitsIt(t *testing.T) {
+	ranker := &NewsRanker{complete: func(context.Context, string) (string, error) {
+		return `[{"link":"https://example.com/1","summary":"Саммари."}]`, nil
+	}}
+	candidates := []provider.NewsItem{
+		{Title: "Original Title", Link: "https://example.com/1"},
+	}
+
+	out, err := ranker.Rank(context.Background(), candidates, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out[0].Title != "Original Title" {
+		t.Fatalf("title = %q, want original title preserved", out[0].Title)
 	}
 }
 
@@ -73,6 +120,54 @@ func TestNewsRankerSkipsHallucinatedLinks(t *testing.T) {
 	}
 	if len(out) != 1 || out[0].Link != "https://example.com/1" {
 		t.Fatalf("out = %+v, want only the real link", out)
+	}
+}
+
+// TestNewsRankerToleratesRawControlCharsInStrings verifies that a raw
+// (unescaped) tab or newline emitted by the model inside a JSON string
+// value — technically invalid JSON, but a common LLM mistake — is repaired
+// rather than treated as a parse failure that falls back to the heuristic.
+func TestNewsRankerToleratesRawControlCharsInStrings(t *testing.T) {
+	raw := "[{\"link\":\"https://example.com/1\",\"summary\":\"Первое предложение.\tВторое предложение.\n\"}]"
+	ranker := &NewsRanker{complete: func(context.Context, string) (string, error) {
+		return raw, nil
+	}}
+	candidates := []provider.NewsItem{{Title: "1", Link: "https://example.com/1"}}
+
+	out, err := ranker.Rank(context.Background(), candidates, 1)
+	if err != nil {
+		t.Fatalf("expected raw control chars in the response to be tolerated, got: %v", err)
+	}
+	if len(out) != 1 {
+		t.Fatalf("len(out) = %d, want 1", len(out))
+	}
+	if !strings.Contains(out[0].Summary, "Первое предложение.") || !strings.Contains(out[0].Summary, "Второе предложение.") {
+		t.Fatalf("summary = %q, want both sentences preserved", out[0].Summary)
+	}
+}
+
+func TestSanitizeJSONStringsEscapesControlCharsOnlyInsideStrings(t *testing.T) {
+	// A raw newline used as pretty-print whitespace between array elements
+	// (outside any string) is already legal JSON and must be left alone.
+	in := "[\n\t{\"a\":\"line1\tline2\"}\n]"
+	out := sanitizeJSONStrings(in)
+
+	var decoded []map[string]string
+	if err := json.Unmarshal([]byte(out), &decoded); err != nil {
+		t.Fatalf("sanitized JSON still invalid: %v (sanitized: %q)", err, out)
+	}
+	if decoded[0]["a"] != "line1\tline2" {
+		t.Fatalf("a = %q, want tab preserved inside the value", decoded[0]["a"])
+	}
+}
+
+// TestSanitizeJSONStringsDoesNotDoubleEscape ensures an already-valid "\n"
+// escape sequence in the input passes through unchanged.
+func TestSanitizeJSONStringsDoesNotDoubleEscape(t *testing.T) {
+	in := `{"a":"line1\nline2"}`
+	out := sanitizeJSONStrings(in)
+	if out != in {
+		t.Fatalf("sanitizeJSONStrings altered already-valid input: got %q, want %q", out, in)
 	}
 }
 

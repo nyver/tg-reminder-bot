@@ -1,6 +1,9 @@
 package rss
 
 import (
+	"context"
+	"errors"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -160,6 +163,98 @@ func TestExtractSummaryHandlesAbbreviations(t *testing.T) {
 	got := extractSummary(text)
 	if !strings.HasSuffix(got, "Это второе предложение.") {
 		t.Errorf("abbreviation caused a false sentence split: %q", got)
+	}
+}
+
+// TestFetchMergesMultipleFeeds verifies that a comma-separated url param
+// fetches every feed and combines their items into one deduped, scored
+// list — the "one shared top-N" behavior for a multi-feed digest.
+func TestFetchMergesMultipleFeeds(t *testing.T) {
+	p := &Provider{log: slog.Default()}
+	p.fetchOne = func(_ context.Context, feedURL string) ([]provider.NewsItem, error) {
+		switch feedURL {
+		case "https://a.example/rss":
+			return []provider.NewsItem{{Title: "From A", Link: "https://a.example/1"}}, nil
+		case "https://b.example/rss":
+			return []provider.NewsItem{{Title: "From B", Link: "https://b.example/1"}}, nil
+		default:
+			t.Fatalf("unexpected feed URL: %q", feedURL)
+			return nil, nil
+		}
+	}
+
+	items, err := p.Fetch(context.Background(), provider.Query{
+		Params: map[string]string{"url": "https://a.example/rss, https://b.example/rss"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("expected items from both feeds, got %d: %+v", len(items), items)
+	}
+}
+
+// TestFetchToleratesOneFeedFailing verifies that a digest with several
+// feeds still succeeds with items from the feeds that worked, when one of
+// them fails — a single blocked/dead feed must not kill the whole digest.
+func TestFetchToleratesOneFeedFailing(t *testing.T) {
+	p := &Provider{log: slog.Default()}
+	p.fetchOne = func(_ context.Context, feedURL string) ([]provider.NewsItem, error) {
+		if feedURL == "https://dead.example/rss" {
+			return nil, errors.New("connection reset by peer")
+		}
+		return []provider.NewsItem{{Title: "OK", Link: "https://ok.example/1"}}, nil
+	}
+
+	items, err := p.Fetch(context.Background(), provider.Query{
+		Params: map[string]string{"url": "https://dead.example/rss,https://ok.example/rss"},
+	})
+	if err != nil {
+		t.Fatalf("expected partial success, got error: %v", err)
+	}
+	if len(items) != 1 || items[0].Title != "OK" {
+		t.Fatalf("expected only the working feed's item, got %+v", items)
+	}
+}
+
+// TestFetchErrorsWhenAllFeedsFail ensures a digest whose every feed fails
+// surfaces an error instead of silently returning an empty digest.
+func TestFetchErrorsWhenAllFeedsFail(t *testing.T) {
+	p := &Provider{log: slog.Default()}
+	p.fetchOne = func(context.Context, string) ([]provider.NewsItem, error) {
+		return nil, errors.New("boom")
+	}
+
+	_, err := p.Fetch(context.Background(), provider.Query{
+		Params: map[string]string{"url": "https://a.example/rss,https://b.example/rss"},
+	})
+	if err == nil {
+		t.Fatal("expected an error when every feed fails")
+	}
+}
+
+func TestFetchRejectsTooManyURLs(t *testing.T) {
+	p := &Provider{log: slog.Default()}
+	p.fetchOne = func(context.Context, string) ([]provider.NewsItem, error) {
+		return []provider.NewsItem{{Title: "x", Link: "https://x.example/1"}}, nil
+	}
+
+	urls := make([]string, maxFeedURLs+1)
+	for i := range urls {
+		urls[i] = "https://example.com/feed"
+	}
+	_, err := p.Fetch(context.Background(), provider.Query{
+		Params: map[string]string{"url": strings.Join(urls, ",")},
+	})
+	if err == nil {
+		t.Fatal("expected an error for more than maxFeedURLs feeds")
+	}
+}
+
+func TestFetchRequiresAtLeastOneURL(t *testing.T) {
+	p := &Provider{log: slog.Default()}
+	if _, err := p.Fetch(context.Background(), provider.Query{Params: map[string]string{"url": "  , ,"}}); err == nil {
+		t.Fatal("expected an error for an empty url param")
 	}
 }
 

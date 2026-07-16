@@ -84,20 +84,34 @@ func (p *FastPath) Parse(ctx context.Context, text string) (*ParseResult, error)
 	return &ParseResult{Spec: &domain.Spec{}, Confidence: 0}, nil
 }
 
-// parseRSSDigest detects "<...дайджест...> <...HH:MM...> <URL>" phrasings,
-// e.g. "каждый день в 18:00 создай дайджест новостей на основе <ссылка>".
-// The time and top-N are optional; the digest keyword and URL are required.
+// rssDigestMaxURLs bounds how many feeds a free-text digest request can
+// combine, matching provider/rss's own maxFeedURLs and handlers.go's
+// rssMaxURLs — extra URLs beyond this are silently dropped rather than
+// rejected, since fastpath has no way to surface a validation error back to
+// the user (unlike the /rss command).
+const rssDigestMaxURLs = 10
+
+// parseRSSDigest detects "<...дайджест...> <...HH:MM...> <URL[, URL...]>"
+// phrasings, e.g. "каждый день в 18:00 создай дайджест новостей на основе
+// <ссылка>" or "дайджест по лентам <ссылка1> и <ссылка2>". The time and
+// top-N are optional; the digest keyword and at least one URL are required.
 func parseRSSDigest(text string) *ParseResult {
 	if !reRSSDigestKeyword.MatchString(text) {
 		return nil
 	}
-	u := ExtractURL(text)
-	if u == "" {
+	urls := ExtractURLs(text)
+	if len(urls) == 0 {
 		return nil
 	}
-	// Search for time/top-N outside the URL so path segments in the feed
-	// link (rare, but possible) can't be misread as HH:MM or an item count.
-	rest := strings.Replace(text, u, "", 1)
+	if len(urls) > rssDigestMaxURLs {
+		urls = urls[:rssDigestMaxURLs]
+	}
+	// Search for time/top-N outside the URLs so path segments in a feed link
+	// (rare, but possible) can't be misread as HH:MM or an item count.
+	rest := text
+	for _, u := range urls {
+		rest = strings.Replace(rest, u, "", 1)
+	}
 
 	cron := "0 9 * * *"
 	if m := reHHMM.FindStringSubmatch(rest); m != nil {
@@ -126,7 +140,7 @@ func parseRSSDigest(text string) *ParseResult {
 			TopN:    topN,
 			Event: domain.EventSpec{
 				Type:   "rss",
-				Params: map[string]string{"url": u},
+				Params: map[string]string{"url": strings.Join(urls, ",")},
 			},
 		},
 		Confidence: 0.97,
@@ -207,6 +221,18 @@ func intervalToCron(nStr, unit string) string {
 func ExtractURL(s string) string {
 	u := reURLExtract.FindString(s)
 	return strings.TrimRight(u, ".,;:!?)")
+}
+
+// ExtractURLs returns every HTTP(S) URL found in s, trimming trailing
+// punctuation from each — used where a message may reference multiple feeds
+// at once (e.g. an rss digest combining several lentas).
+func ExtractURLs(s string) []string {
+	matches := reURLExtract.FindAllString(s, -1)
+	urls := make([]string, 0, len(matches))
+	for _, m := range matches {
+		urls = append(urls, strings.TrimRight(m, ".,;:!?)"))
+	}
+	return urls
 }
 
 func (p *FastPath) parseTVAnchor(m []string) *ParseResult {

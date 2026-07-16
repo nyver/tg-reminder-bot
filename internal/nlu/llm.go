@@ -330,7 +330,7 @@ func buildPrompt(text string, now time.Time) string {
   horizon_days 30                             (для digest/anchor)
   event.type  tv_program|price|travel|rss     (для conditional)
   event.title название                        (для tv_program/price)
-  event.params {"url":"..."} и т.д.
+  event.params {"url":"..."} и т.д. (для rss с несколькими лентами — через запятую: "url1,url2")
   confidence  0.0-1.0                         (обязательно)
   missing     ["field1"]                      (если чего-то не хватает)
 
@@ -347,6 +347,7 @@ func buildPrompt(text string, now time.Time) string {
 - «5 дешёвых билетов СПб→Калининград» → kind=conditional, trigger=digest, event.type=travel
 - «каждый день в 18:00 создай дайджест новостей на основе <URL>» → kind=conditional, trigger=digest, event.type=rss, event.params.url=<URL>, eval_cron="0 18 * * *"
 - «дайджест новостей по ленте <URL> топ 10 в 8 утра» → kind=conditional, trigger=digest, event.type=rss, event.params.url=<URL>, top_n=10, eval_cron="0 8 * * *"
+- «дайджест по лентам <URL1> и <URL2> в 9 утра» → kind=conditional, trigger=digest, event.type=rss, event.params.url="<URL1>,<URL2>" (несколько ссылок через запятую — один общий дайджест по всем лентам)
 - horizon_days: «неделя»→7, «месяц»→30, «2 недели»→14, default→30
 - confidence: 0.9+ ясно, 0.5-0.9 допущения, <0.5 неясно
 
@@ -415,13 +416,24 @@ func mapToResult(resp *llmResponse) (*ParseResult, error) {
 		}
 	}
 
-	// If price/rss reminder but URL landed in message instead of event.params, rescue it.
+	// If price/rss reminder but URL(s) landed in message instead of
+	// event.params, rescue them. rss can combine several feeds into one
+	// digest, so all URLs found are kept (comma-joined); price only ever
+	// tracks a single product page, so just the first one is used.
 	if (spec.Event.Type == "price" || spec.Event.Type == "rss") && (spec.Event.Params == nil || spec.Event.Params["url"] == "") {
-		if u := ExtractURL(resp.Message); u != "" {
+		var url string
+		if spec.Event.Type == "rss" {
+			if urls := ExtractURLs(resp.Message); len(urls) > 0 {
+				url = strings.Join(urls, ",")
+			}
+		} else if u := ExtractURL(resp.Message); u != "" {
+			url = u
+		}
+		if url != "" {
 			if spec.Event.Params == nil {
 				spec.Event.Params = make(map[string]string)
 			}
-			spec.Event.Params["url"] = u
+			spec.Event.Params["url"] = url
 		}
 	}
 	if resp.LeadTime != "" {

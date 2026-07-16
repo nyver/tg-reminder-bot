@@ -166,8 +166,10 @@ func (h *Handler) handleList(c tele.Context) error {
 			sb.WriteString(fmt.Sprintf("`/refresh %s`\n", r.ID.String()))
 		}
 		if r.Spec.Trigger == domain.TriggerDigest && r.Spec.Event.Type == "rss" {
-			if u := r.Spec.Event.Params["url"]; u != "" {
-				sb.WriteString("📰 " + escapeMarkdown(u) + "\n")
+			for _, u := range strings.Split(r.Spec.Event.Params["url"], ",") {
+				if u = strings.TrimSpace(u); u != "" {
+					sb.WriteString("📰 " + escapeMarkdown(u) + "\n")
+				}
 			}
 			if r.EvalCron != "" {
 				sb.WriteString(fmt.Sprintf("🕐 Рассылка: `%s`\n", escapeMarkdown(cronToHHMM(r.EvalCron))))
@@ -331,7 +333,8 @@ func (h *Handler) handleRun(c tele.Context) error {
 		return c.Send("Сейчас отправлять нечего: условие не выполнено или данные недоступны.")
 	}
 	for _, p := range planned {
-		if err := c.Send(p.Text); err != nil {
+		text, opts := stripMarkdownV2(p.Text)
+		if err := c.Send(text, opts...); err != nil {
 			h.log.Error("manual run send", "id", rem.ID, "err", err)
 		}
 	}
@@ -645,6 +648,10 @@ const (
 	rssDefaultTopN       = 5
 	rssMinTopN           = 1
 	rssMaxTopN           = 20
+	// rssMaxURLs bounds how many feeds one /rss reminder can combine. Matches
+	// provider/rss's own maxFeedURLs — enforced here too so a bad list fails
+	// fast with a clear message instead of only at evaluation time.
+	rssMaxURLs = 10
 )
 
 func (h *Handler) handleRSS(c tele.Context) error {
@@ -653,17 +660,19 @@ func (h *Handler) handleRSS(c tele.Context) error {
 		return c.Send(
 			"Использование:\n"+
 				"`/rss https://example.com/feed.xml` — дайджест важных новостей ежедневно в 09:00 (топ-5)\n"+
+				"`/rss https://a.com/feed.xml,https://b.com/feed.xml` — общий дайджест по нескольким лентам\n"+
 				"`/rss https://example.com/feed.xml | 08:30` — своё время рассылки\n"+
 				"`/rss https://example.com/feed.xml | 08:30 | 10` — своё время и число новостей (1–20)",
 			tele.ModeMarkdown,
 		)
 	}
 
-	feedURL, hour, minute, topN, err := parseRSSArgs(args)
+	feedURLs, hour, minute, topN, err := parseRSSArgs(args)
 	if err != nil {
 		return c.Send("⚠️ " + err.Error())
 	}
 	cronExpr := fmt.Sprintf("%d %d * * *", minute, hour)
+	title := feedHostsDisplay(feedURLs)
 
 	ctx, cancel := context.WithTimeout(context.Background(), handlerTimeout)
 	defer cancel()
@@ -682,7 +691,7 @@ func (h *Handler) handleRSS(c tele.Context) error {
 
 	rem := &domain.Reminder{
 		UserID:   userID,
-		RawText:  "RSS-дайджест: " + feedURL,
+		RawText:  "RSS-дайджест: " + title,
 		Kind:     domain.KindConditional,
 		Status:   domain.StatusActive,
 		EvalCron: cronExpr,
@@ -691,8 +700,8 @@ func (h *Handler) handleRSS(c tele.Context) error {
 			TopN:    topN,
 			Event: domain.EventSpec{
 				Type:   "rss",
-				Title:  feedHost(feedURL),
-				Params: map[string]string{"url": feedURL},
+				Title:  title,
+				Params: map[string]string{"url": strings.Join(feedURLs, ",")},
 			},
 		},
 		NextEvalAt: &next,
@@ -701,7 +710,7 @@ func (h *Handler) handleRSS(c tele.Context) error {
 
 	if err := h.reminders.Create(ctx, rem); err != nil {
 		if errors.Is(err, domain.ErrAlreadyExists) {
-			return c.Send("ℹ️ У вас уже есть подписка на эту ленту с такими же параметрами.")
+			return c.Send("ℹ️ У вас уже есть подписка на эту ленту (или набор лент) с такими же параметрами.")
 		}
 		h.log.Error("create rss reminder", "err", err)
 		return c.Send("Ошибка при сохранении подписки.")
@@ -709,24 +718,34 @@ func (h *Handler) handleRSS(c tele.Context) error {
 
 	return c.Send(fmt.Sprintf(
 		"✅ Дайджест настроен: *%s*\nВремя рассылки: `%02d:%02d`\nЧисло новостей: *%d*\n\n`/cancel %s` — отменить\n`/pause %s` — приостановить",
-		escapeMarkdown(feedHost(feedURL)), hour, minute, topN, rem.ID.String(), rem.ID.String(),
+		escapeMarkdown(title), hour, minute, topN, rem.ID.String(), rem.ID.String(),
 	), tele.ModeMarkdown)
 }
 
-// parseRSSArgs parses the /rss payload "<url>[ | HH:MM][ | N]" into its feed
-// URL, daily digest time and top-N item count. It performs a cheap, local
-// validation of the URL (scheme + host) — the full SSRF-safe check happens in
-// provider/rss at evaluation time on the worker, since that's where the
+// parseRSSArgs parses the /rss payload "<url>[,<url>...][ | HH:MM][ | N]"
+// into its feed URLs (one or more, combined into a single ranked digest),
+// daily digest time and top-N item count. It performs a cheap, local
+// validation of each URL (scheme + host) — the full SSRF-safe check happens
+// in provider/rss at evaluation time on the worker, since that's where the
 // request is actually made.
-func parseRSSArgs(payload string) (feedURL string, hour, minute, topN int, err error) {
+func parseRSSArgs(payload string) (feedURLs []string, hour, minute, topN int, err error) {
 	parts := strings.Split(payload, "|")
-	feedURL = strings.TrimSpace(parts[0])
-	if feedURL == "" {
-		return "", 0, 0, 0, fmt.Errorf("укажите ссылку на RSS/Atom-ленту")
+	for _, raw := range strings.Split(parts[0], ",") {
+		u := strings.TrimSpace(raw)
+		if u == "" {
+			continue
+		}
+		parsed, uerr := url.ParseRequestURI(u)
+		if uerr != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" {
+			return nil, 0, 0, 0, fmt.Errorf("некорректная ссылка: %s", u)
+		}
+		feedURLs = append(feedURLs, u)
 	}
-	u, uerr := url.ParseRequestURI(feedURL)
-	if uerr != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
-		return "", 0, 0, 0, fmt.Errorf("некорректная ссылка: %s", feedURL)
+	if len(feedURLs) == 0 {
+		return nil, 0, 0, 0, fmt.Errorf("укажите ссылку на RSS/Atom-ленту")
+	}
+	if len(feedURLs) > rssMaxURLs {
+		return nil, 0, 0, 0, fmt.Errorf("слишком много лент: максимум %d", rssMaxURLs)
 	}
 
 	hour, minute = rssDefaultCronHour, rssDefaultCronMinute
@@ -742,14 +761,14 @@ func parseRSSArgs(payload string) (feedURL string, hour, minute, topN int, err e
 		}
 		if n, nerr := strconv.Atoi(p); nerr == nil {
 			if n < rssMinTopN || n > rssMaxTopN {
-				return "", 0, 0, 0, fmt.Errorf("число новостей должно быть от %d до %d", rssMinTopN, rssMaxTopN)
+				return nil, 0, 0, 0, fmt.Errorf("число новостей должно быть от %d до %d", rssMinTopN, rssMaxTopN)
 			}
 			topN = n
 			continue
 		}
-		return "", 0, 0, 0, fmt.Errorf("не удалось разобрать параметр %q (ожидается время ЧЧ:ММ или число)", p)
+		return nil, 0, 0, 0, fmt.Errorf("не удалось разобрать параметр %q (ожидается время ЧЧ:ММ или число)", p)
 	}
-	return feedURL, hour, minute, topN, nil
+	return feedURLs, hour, minute, topN, nil
 }
 
 // feedHost extracts a short display name for a feed URL, e.g.
@@ -760,6 +779,22 @@ func feedHost(rawURL string) string {
 		return rawURL
 	}
 	return strings.TrimPrefix(u.Hostname(), "www.")
+}
+
+// feedHostsDisplay builds a short display label for one or more feed URLs,
+// e.g. "lenta.ru" for one, "lenta.ru, habr.com" for a few, and
+// "lenta.ru, habr.com +2 ещё" beyond a handful — used as the digest title
+// and in the /rss confirmation message.
+func feedHostsDisplay(urls []string) string {
+	const maxShown = 3
+	hosts := make([]string, 0, len(urls))
+	for _, u := range urls {
+		hosts = append(hosts, feedHost(u))
+	}
+	if len(hosts) <= maxShown {
+		return strings.Join(hosts, ", ")
+	}
+	return strings.Join(hosts[:maxShown], ", ") + fmt.Sprintf(" +%d ещё", len(hosts)-maxShown)
 }
 
 // cronToHHMM converts a "<minute> <hour> * * *" cron expression (as produced
@@ -1283,8 +1318,12 @@ func validateParseResult(result *nlu.ParseResult) error {
 			if result.Spec.Trigger != domain.TriggerDigest {
 				return fmt.Errorf("rss reminder requires digest trigger")
 			}
-			if result.Spec.Event.Params["url"] == "" {
+			u := result.Spec.Event.Params["url"]
+			if u == "" {
 				return fmt.Errorf("rss reminder requires event.params.url")
+			}
+			if n := strings.Count(u, ",") + 1; n > rssMaxURLs {
+				return fmt.Errorf("rss reminder has too many feed URLs (%d, max %d)", n, rssMaxURLs)
 			}
 		default:
 			if result.Spec.Event.Title == "" {
@@ -1380,8 +1419,10 @@ func formatSpec(spec *domain.Spec) string {
 		sb.WriteString("📉 Уведомить при снижении цены\n")
 	case domain.TriggerDigest:
 		if spec.Event.Type == "rss" {
-			if u := spec.Event.Params["url"]; u != "" {
-				sb.WriteString("📰 " + escapeMarkdown(u) + "\n")
+			for _, u := range strings.Split(spec.Event.Params["url"], ",") {
+				if u = strings.TrimSpace(u); u != "" {
+					sb.WriteString("📰 " + escapeMarkdown(u) + "\n")
+				}
 			}
 		}
 		if spec.TopN > 0 {
@@ -1498,6 +1539,7 @@ const msgHelp = `*Команды:*
 /tv | <канал> — программа канала на сегодня
 /tv | <канал> 25\.06 — программа канала на дату
 /rss <ссылка> — дайджест важных новостей ежедневно в 09:00 (топ\-5)
+/rss <ссылка1>,<ссылка2> — общий дайджест по нескольким лентам
 /rss <ссылка> | ЧЧ:ММ — своё время рассылки
 /rss <ссылка> | ЧЧ:ММ | N — своё время и число новостей \(1\-20\)
 /help — эта справка

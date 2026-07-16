@@ -570,29 +570,66 @@ func renderDigest(spec domain.Spec, offers []provider.Offer, prev *domain.Observ
 	return sb.String()
 }
 
+// MarkdownV2Prefix marks a PlannedNotification.Text (and the
+// ScheduledNotification.Text derived from it) as pre-escaped MarkdownV2,
+// telling the delivery layer to send it with Telegram's MarkdownV2 parse
+// mode instead of the plain-text default every other notification kind
+// uses. Consumers must strip this prefix before sending. It's a string
+// sentinel rather than a new persisted field specifically to avoid a
+// database migration for what is purely a delivery-time rendering hint.
+const MarkdownV2Prefix = "\x01"
+
+// renderNewsDigest formats an RSS/Atom digest as MarkdownV2 with each item's
+// title as a clickable link (see MarkdownV2Prefix), instead of showing the
+// raw URL on its own line. All feed-controlled text (title, summary) is
+// escaped via mdv2Escape so untrusted content can never break the message's
+// formatting or inject unintended entities.
 func renderNewsDigest(spec domain.Spec, items []provider.NewsItem) string {
 	var sb strings.Builder
+	sb.WriteString(MarkdownV2Prefix)
+
 	title := spec.Event.Title
 	if title == "" {
 		title = "RSS-дайджест"
 	}
-	sb.WriteString(fmt.Sprintf("📰 *%s* — %d важных новостей\n\n", title, len(items)))
+	sb.WriteString(fmt.Sprintf("📰 *%s* — %d важных новостей\n\n", mdv2Escape(title), len(items)))
 
 	for i, it := range items {
-		sb.WriteString(fmt.Sprintf("%d. %s", i+1, it.Title))
+		sb.WriteString(fmt.Sprintf("%d\\. ", i+1))
+		switch {
+		case it.Link != "":
+			sb.WriteString(fmt.Sprintf("*[%s](%s)*", mdv2Escape(it.Title), mdv2EscapeURL(it.Link)))
+		default:
+			sb.WriteString("*" + mdv2Escape(it.Title) + "*")
+		}
 		if !it.PublishedAt.IsZero() {
-			sb.WriteString(" · " + it.PublishedAt.Format("02.01 15:04"))
+			sb.WriteString(" · _" + mdv2Escape(it.PublishedAt.Format("02.01 15:04")) + "_")
 		}
 		sb.WriteString("\n")
 		if it.Summary != "" {
-			sb.WriteString("   " + it.Summary + "\n")
-		}
-		if it.Link != "" {
-			sb.WriteString("   " + it.Link + "\n")
+			sb.WriteString(mdv2Escape(it.Summary) + "\n")
 		}
 		sb.WriteString("\n")
 	}
 	return sb.String()
+}
+
+// mdv2Replacer escapes all MarkdownV2 special characters.
+var mdv2Replacer = strings.NewReplacer(
+	"_", "\\_", "*", "\\*", "[", "\\[", "]", "\\]",
+	"(", "\\(", ")", "\\)", "~", "\\~", "`", "\\`",
+	">", "\\>", "#", "\\#", "+", "\\+", "-", "\\-",
+	"=", "\\=", "|", "\\|", "{", "\\{", "}", "\\}",
+	".", "\\.", "!", "\\!",
+)
+
+func mdv2Escape(s string) string { return mdv2Replacer.Replace(s) }
+
+// mdv2EscapeURL escapes a URL for use inside MarkdownV2 link syntax
+// [text](url) — only backslash and closing paren are special there.
+func mdv2EscapeURL(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	return strings.ReplaceAll(s, `)`, `\)`)
 }
 
 func formatPrice(kopecks int64, currency string) string {

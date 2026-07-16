@@ -145,6 +145,29 @@ func TestFastPathParsesRSSDigest(t *testing.T) {
 	}
 }
 
+// TestFastPathParsesRSSDigestMultipleURLs verifies that a free-text digest
+// request naming several feeds combines them into one comma-joined url
+// param, for a single shared top-N digest across all of them.
+func TestFastPathParsesRSSDigestMultipleURLs(t *testing.T) {
+	t.Parallel()
+	parser := NewFastPath(time.UTC)
+
+	result, err := parser.Parse(context.Background(), "дайджест новостей по лентам https://lenta.ru/rss и https://habr.com/rss в 8:00")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Spec.Event.Type != "rss" {
+		t.Fatalf("event.type = %q, want rss", result.Spec.Event.Type)
+	}
+	want := "https://lenta.ru/rss,https://habr.com/rss"
+	if got := result.Spec.Event.Params["url"]; got != want {
+		t.Fatalf("url = %q, want %q", got, want)
+	}
+	if result.EvalCron != "0 8 * * *" {
+		t.Fatalf("eval_cron = %q, want %q", result.EvalCron, "0 8 * * *")
+	}
+}
+
 func TestFastPathRSSDigestDefaultsAndTopN(t *testing.T) {
 	t.Parallel()
 	parser := NewFastPath(time.UTC)
@@ -217,6 +240,27 @@ func TestMapToResultRescuesRSSURLFromMessage(t *testing.T) {
 	}
 	if got := result.Spec.Event.Params["url"]; got != "https://lenta.ru/rss" {
 		t.Fatalf("url = %q", got)
+	}
+}
+
+// TestMapToResultRescuesMultipleRSSURLsFromMessage verifies that when the
+// model names several feeds in message text without filling event.params,
+// all of them are rescued (comma-joined) rather than only the first.
+func TestMapToResultRescuesMultipleRSSURLsFromMessage(t *testing.T) {
+	resp := &llmResponse{
+		Kind:       "conditional",
+		Trigger:    "digest",
+		Message:    "дайджест по лентам https://lenta.ru/rss и https://habr.com/rss",
+		Confidence: 0.9,
+		Event:      llmEvent{Type: "rss"},
+	}
+	result, err := mapToResult(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "https://lenta.ru/rss,https://habr.com/rss"
+	if got := result.Spec.Event.Params["url"]; got != want {
+		t.Fatalf("url = %q, want %q", got, want)
 	}
 }
 
