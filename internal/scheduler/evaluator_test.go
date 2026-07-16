@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -229,6 +230,49 @@ func TestNewsDigestHappyPath(t *testing.T) {
 	}
 }
 
+// TestNewsDigestSplitsIntoMultiplePlannedNotifications verifies that a
+// digest too large for one Telegram message produces several
+// PlannedNotifications, each with a distinct IdempotencyKey — otherwise a
+// naive shared key would collide in the notifications table's ON CONFLICT
+// and silently drop every chunk but the first.
+func TestNewsDigestSplitsIntoMultiplePlannedNotifications(t *testing.T) {
+	now := time.Date(2026, 7, 13, 9, 0, 0, 0, time.UTC)
+	items := make([]provider.NewsItem, 30)
+	for i := range items {
+		items[i] = provider.NewsItem{
+			Title:   fmt.Sprintf("Заголовок новости номер %d с некоторой длиной текста", i),
+			Link:    fmt.Sprintf("https://example.com/news/%d", i),
+			Summary: strings.Repeat("Предложение саммари для проверки длины сообщения. ", 6),
+		}
+	}
+	registry := provider.NewRegistry()
+	registry.RegisterNews(newsProviderFunc(func(context.Context, provider.Query) ([]provider.NewsItem, error) {
+		return items, nil
+	}))
+	rem := newsDigestReminder()
+	rem.Spec.TopN = len(items)
+	evaluator := NewEvaluator(registry, &fakeHistory{}, clock.NewFake(now), 180, nil)
+
+	planned, err := evaluator.Evaluate(context.Background(), rem)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(planned) < 2 {
+		t.Fatalf("expected multiple planned notifications for an oversized digest, got %d", len(planned))
+	}
+
+	seenKeys := make(map[string]bool, len(planned))
+	for i, p := range planned {
+		if len([]rune(p.Text)) > 4096 {
+			t.Fatalf("planned[%d] exceeds Telegram's message length limit", i)
+		}
+		if seenKeys[p.IdempotencyKey] {
+			t.Fatalf("planned[%d] reuses idempotency key %q — would collide in storage", i, p.IdempotencyKey)
+		}
+		seenKeys[p.IdempotencyKey] = true
+	}
+}
+
 func TestNewsDigestProviderErrorRetriesNextTick(t *testing.T) {
 	now := time.Date(2026, 7, 13, 9, 0, 0, 0, time.UTC)
 	registry := provider.NewRegistry()
@@ -345,7 +389,11 @@ func TestRenderNewsDigestEscapesAndLinksTitles(t *testing.T) {
 		},
 	}
 
-	text := renderNewsDigest(spec, items)
+	texts := renderNewsDigest(spec, items)
+	if len(texts) != 1 {
+		t.Fatalf("expected a single chunk for one item, got %d: %v", len(texts), texts)
+	}
+	text := texts[0]
 
 	if !strings.HasPrefix(text, MarkdownV2Prefix) {
 		t.Fatalf("expected text to start with MarkdownV2Prefix, got: %q", text)
@@ -364,6 +412,58 @@ func TestRenderNewsDigestEscapesAndLinksTitles(t *testing.T) {
 	}
 }
 
+// TestRenderNewsDigestSplitsWhenTooLong verifies that a digest whose total
+// rendered size would exceed Telegram's ~4096-character sendMessage limit is
+// split into multiple chunks at item boundaries, each one individually
+// under the limit and each carrying its own MarkdownV2Prefix marker.
+func TestRenderNewsDigestSplitsWhenTooLong(t *testing.T) {
+	items := make([]provider.NewsItem, 30)
+	for i := range items {
+		items[i] = provider.NewsItem{
+			Title:   fmt.Sprintf("Заголовок новости номер %d с некоторой длиной текста", i),
+			Link:    fmt.Sprintf("https://example.com/news/%d", i),
+			Summary: strings.Repeat("Предложение саммари для проверки длины сообщения. ", 6),
+		}
+	}
+
+	texts := renderNewsDigest(domain.Spec{Event: domain.EventSpec{Title: "lenta.ru"}}, items)
+	if len(texts) < 2 {
+		t.Fatalf("expected the digest to split into multiple messages, got %d", len(texts))
+	}
+
+	seenItems := 0
+	for i, text := range texts {
+		if !strings.HasPrefix(text, MarkdownV2Prefix) {
+			t.Fatalf("chunk %d missing MarkdownV2Prefix: %q", i, text)
+		}
+		if len([]rune(text)) > 4096 {
+			t.Fatalf("chunk %d exceeds Telegram's message length limit: %d runes", i, len([]rune(text)))
+		}
+		wantPart := fmt.Sprintf("часть %d из %d", i+1, len(texts))
+		if !strings.Contains(text, wantPart) {
+			t.Errorf("chunk %d header missing %q: %s", i, wantPart, text)
+		}
+		seenItems += strings.Count(text, "example.com/news/")
+	}
+	if seenItems != len(items) {
+		t.Fatalf("expected every item to appear exactly once across chunks, got %d of %d", seenItems, len(items))
+	}
+}
+
+func TestClampDigestSummaryTruncatesLongSummaries(t *testing.T) {
+	long := strings.Repeat("а", digestSummaryMaxLen+100)
+	got := clampDigestSummary(long)
+	if r := []rune(got); len(r) > digestSummaryMaxLen+1 { // +1 for the trailing ellipsis rune
+		t.Fatalf("clampDigestSummary did not truncate: %d runes", len(r))
+	}
+	if !strings.HasSuffix(got, "…") {
+		t.Fatalf("expected truncated summary to end with an ellipsis, got: %q", got[len(got)-10:])
+	}
+	if short := "коротко"; clampDigestSummary(short) != short {
+		t.Fatalf("clampDigestSummary altered a short summary: %q", clampDigestSummary(short))
+	}
+}
+
 // TestRenderNewsDigestEscapesURLParens verifies that a feed URL containing a
 // closing paren doesn't prematurely terminate the MarkdownV2 link syntax.
 func TestRenderNewsDigestEscapesURLParens(t *testing.T) {
@@ -372,7 +472,11 @@ func TestRenderNewsDigestEscapesURLParens(t *testing.T) {
 		{Title: "Title", Link: "https://example.com/wiki/Foo_(bar)"},
 	}
 
-	text := renderNewsDigest(spec, items)
+	texts := renderNewsDigest(spec, items)
+	if len(texts) != 1 {
+		t.Fatalf("expected a single chunk for one item, got %d: %v", len(texts), texts)
+	}
+	text := texts[0]
 	if !strings.Contains(text, "(https://example.com/wiki/Foo_(bar\\))") {
 		t.Fatalf("expected escaped closing paren in link URL, got: %s", text)
 	}

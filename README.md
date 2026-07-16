@@ -425,6 +425,11 @@ other notification kind (price drops, TV reminders, plain reminders) is
 still sent as plain text, unaffected by this — only digest messages opt
 into MarkdownV2 rendering.
 
+Telegram rejects any single message over ~4096 characters, which a
+multi-feed or top-10+ digest can exceed. When that happens the digest is
+split into several messages at item boundaries (never mid-item), each
+headed `(часть X из Y)`, instead of failing to send outright.
+
 ### SSRF protection
 
 A feed URL is user-supplied input the server makes an outbound request to —

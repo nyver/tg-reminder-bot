@@ -358,13 +358,21 @@ func (e *Evaluator) evaluateNewsDigest(ctx context.Context, r domain.Reminder) (
 		e.log.Warn("save rss digest observation failed", "reminder_id", r.ID, "err", err)
 	}
 
-	text := renderNewsDigest(r.Spec, items)
-	key := idemKey(r.ID, "rss_digest:"+now.In(userTZ(r)).Format("2006-01-02"))
-	return []PlannedNotification{{
-		FireAt:         now,
-		Text:           text,
-		IdempotencyKey: key,
-	}}, nil
+	// A digest can render into several messages when it doesn't fit
+	// Telegram's length limit (see renderNewsDigest) — each chunk needs its
+	// own idempotency key so persisting one doesn't collide with (and
+	// silently drop) the others via the notifications table's ON CONFLICT.
+	texts := renderNewsDigest(r.Spec, items)
+	dateKey := now.In(userTZ(r)).Format("2006-01-02")
+	planned := make([]PlannedNotification, len(texts))
+	for i, text := range texts {
+		planned[i] = PlannedNotification{
+			FireAt:         now,
+			Text:           text,
+			IdempotencyKey: idemKey(r.ID, fmt.Sprintf("rss_digest:%s:%d", dateKey, i)),
+		}
+	}
+	return planned, nil
 }
 
 // rankNews applies the optional LLM ranker to a heuristic candidate pool.
@@ -579,39 +587,107 @@ func renderDigest(spec domain.Spec, offers []provider.Offer, prev *domain.Observ
 // database migration for what is purely a delivery-time rendering hint.
 const MarkdownV2Prefix = "\x01"
 
+// telegramMaxMessageLen is a safety margin under Telegram's hard 4096-
+// character sendMessage limit — sendMessage rejects anything over that with
+// "message is too long" (HTTP 400). Left as headroom rather than the exact
+// limit to account for the header repeated on every chunk and any encoding
+// differences.
+const telegramMaxMessageLen = 3500
+
+// digestSummaryMaxLen caps a single item's summary at render time,
+// regardless of source — the heuristic's own extractSummary already limits
+// itself to a few hundred runes, but an LLM-rewritten summary (see
+// NewsRanker) has no such guarantee, and one runaway summary alone could
+// still blow the message-length budget.
+const digestSummaryMaxLen = 500
+
 // renderNewsDigest formats an RSS/Atom digest as MarkdownV2 with each item's
 // title as a clickable link (see MarkdownV2Prefix), instead of showing the
 // raw URL on its own line. All feed-controlled text (title, summary) is
 // escaped via mdv2Escape so untrusted content can never break the message's
 // formatting or inject unintended entities.
-func renderNewsDigest(spec domain.Spec, items []provider.NewsItem) string {
-	var sb strings.Builder
-	sb.WriteString(MarkdownV2Prefix)
-
+//
+// The result is one or more messages: Telegram rejects any single message
+// over ~4096 characters, and a digest of 10+ items with full summaries
+// routinely exceeds that, so items are packed into as many
+// MarkdownV2Prefix-tagged chunks as needed, split only at item boundaries
+// (never mid-item) so each chunk's MarkdownV2 stays well-formed.
+func renderNewsDigest(spec domain.Spec, items []provider.NewsItem) []string {
 	title := spec.Event.Title
 	if title == "" {
 		title = "RSS-дайджест"
 	}
-	sb.WriteString(fmt.Sprintf("📰 *%s* — %d важных новостей\n\n", mdv2Escape(title), len(items)))
 
+	blocks := make([]string, len(items))
 	for i, it := range items {
-		sb.WriteString(fmt.Sprintf("%d\\. ", i+1))
+		var b strings.Builder
+		b.WriteString(fmt.Sprintf("%d\\. ", i+1))
 		switch {
 		case it.Link != "":
-			sb.WriteString(fmt.Sprintf("*[%s](%s)*", mdv2Escape(it.Title), mdv2EscapeURL(it.Link)))
+			b.WriteString(fmt.Sprintf("*[%s](%s)*", mdv2Escape(it.Title), mdv2EscapeURL(it.Link)))
 		default:
-			sb.WriteString("*" + mdv2Escape(it.Title) + "*")
+			b.WriteString("*" + mdv2Escape(it.Title) + "*")
 		}
 		if !it.PublishedAt.IsZero() {
-			sb.WriteString(" · _" + mdv2Escape(it.PublishedAt.Format("02.01 15:04")) + "_")
+			b.WriteString(" · _" + mdv2Escape(it.PublishedAt.Format("02.01 15:04")) + "_")
 		}
-		sb.WriteString("\n")
+		b.WriteString("\n")
 		if it.Summary != "" {
-			sb.WriteString(mdv2Escape(it.Summary) + "\n")
+			b.WriteString(mdv2Escape(clampDigestSummary(it.Summary)) + "\n")
 		}
-		sb.WriteString("\n")
+		b.WriteString("\n")
+		blocks[i] = b.String()
 	}
-	return sb.String()
+
+	// headerBudget reserves room for the header text repeated on every
+	// chunk (title, item count, and a "part X of Y" suffix on multi-chunk
+	// digests), so the running total below only needs to track item blocks.
+	const headerBudget = 200
+	maxContentLen := telegramMaxMessageLen - headerBudget
+
+	var chunks [][]string
+	var cur []string
+	curLen := 0
+	for _, blk := range blocks {
+		if len(cur) > 0 && curLen+len(blk) > maxContentLen {
+			chunks = append(chunks, cur)
+			cur = nil
+			curLen = 0
+		}
+		cur = append(cur, blk)
+		curLen += len(blk)
+	}
+	if len(cur) > 0 {
+		chunks = append(chunks, cur)
+	}
+	if len(chunks) == 0 {
+		return nil
+	}
+
+	out := make([]string, len(chunks))
+	for i, chunk := range chunks {
+		var sb strings.Builder
+		sb.WriteString(MarkdownV2Prefix)
+		if len(chunks) > 1 {
+			sb.WriteString(fmt.Sprintf("📰 *%s* — %d важных новостей \\(часть %d из %d\\)\n\n",
+				mdv2Escape(title), len(items), i+1, len(chunks)))
+		} else {
+			sb.WriteString(fmt.Sprintf("📰 *%s* — %d важных новостей\n\n", mdv2Escape(title), len(items)))
+		}
+		for _, blk := range chunk {
+			sb.WriteString(blk)
+		}
+		out[i] = sb.String()
+	}
+	return out
+}
+
+func clampDigestSummary(s string) string {
+	r := []rune(s)
+	if len(r) <= digestSummaryMaxLen {
+		return s
+	}
+	return string(r[:digestSummaryMaxLen]) + "…"
 }
 
 // mdv2Replacer escapes all MarkdownV2 special characters.
