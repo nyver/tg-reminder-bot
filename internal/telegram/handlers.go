@@ -169,7 +169,8 @@ func (h *Handler) buildListMessages(ctx context.Context, rems []domain.Reminder,
 
 func (h *Handler) writeListReminder(ctx context.Context, sb *strings.Builder, index int, r domain.Reminder, loc *time.Location) {
 	title := truncateRunes(listReminderTitle(r), listReminderTitleLimit)
-	sb.WriteString(fmt.Sprintf("%d\\. *%s* `%s`\n", index, escapeMarkdown(title), escapeMarkdown(statusLabel(r.Status))))
+	sb.WriteString(fmt.Sprintf("*%d\\. %s*\n", index, escapeMarkdown(title)))
+	sb.WriteString(fmt.Sprintf("   • Статус: `%s`\n", escapeMarkdown(statusLabel(r.Status))))
 
 	switch {
 	case r.Spec.Trigger == domain.TriggerDigest && r.Spec.Event.Type == "rss":
@@ -180,7 +181,7 @@ func (h *Handler) writeListReminder(ctx context.Context, sb *strings.Builder, in
 		writeListTVDetails(sb, r)
 	case r.EvalCron != "":
 		if line := formatCronLineRu(r.EvalCron); line != "" {
-			sb.WriteString("   🕐 " + escapeMarkdown(line) + "\n")
+			sb.WriteString("   • Расписание: " + escapeMarkdown(line) + "\n")
 		}
 	}
 
@@ -215,14 +216,14 @@ func listReminderTitle(r domain.Reminder) string {
 func writeListRSSDetails(sb *strings.Builder, r domain.Reminder) {
 	feeds := splitFeedURLs(r.Spec.Event.Params["url"])
 	if r.EvalCron != "" {
-		sb.WriteString(fmt.Sprintf("   🕐 Рассылка: `%s`", escapeMarkdown(cronToHHMM(r.EvalCron))))
+		sb.WriteString(fmt.Sprintf("   • Рассылка: `%s`", escapeMarkdown(cronToHHMM(r.EvalCron))))
 		if topN := orDefaultInt(r.Spec.TopN, rssDefaultTopN); topN > 0 {
 			sb.WriteString(fmt.Sprintf(" · топ\\-%d", topN))
 		}
 		sb.WriteByte('\n')
 	}
 	if len(feeds) > 0 {
-		sb.WriteString(fmt.Sprintf("   📰 Ленты \\(%d\\): %s\n", len(feeds), escapeMarkdown(feedHostsDisplay(feeds))))
+		sb.WriteString(fmt.Sprintf("   • Ленты \\(%d\\): %s\n", len(feeds), escapeMarkdown(feedHostsDisplay(feeds))))
 	}
 }
 
@@ -234,38 +235,40 @@ func (h *Handler) writeListPriceDetails(ctx context.Context, sb *strings.Builder
 				title = r.Spec.Event.Title
 			}
 			if title != "" && strings.TrimSpace(title) != strings.TrimSpace(r.Spec.Event.Title) {
-				sb.WriteString("   📌 " + escapeMarkdown(truncateRunes(title, listReminderTitleLimit)) + "\n")
+				sb.WriteString("   • Товар: " + escapeMarkdown(truncateRunes(title, listReminderTitleLimit)) + "\n")
 			}
 			at := obs.ObservedAt.In(loc).Format("02.01 15:04")
-			sb.WriteString(fmt.Sprintf("   💰 Последняя цена: *%s* \\(%s\\)\n",
+			sb.WriteString(fmt.Sprintf("   • Последняя цена: *%s* \\(%s\\)\n",
 				escapeMarkdown(formatPriceRub(obs.Value, obs.Currency)),
 				escapeMarkdown(at),
 			))
 		}
 	}
 	if u := r.Spec.Event.Params["url"]; u != "" {
-		sb.WriteString("   🔗 " + escapeMarkdown(feedHost(u)) + "\n")
+		sb.WriteString("   • Сайт: " + escapeMarkdown(feedHost(u)) + "\n")
 	}
-	sb.WriteString(fmt.Sprintf("   🔄 `/refresh %s`\n", r.ID.String()))
+	sb.WriteString(fmt.Sprintf("   • Обновить цену: `/refresh %s`\n", r.ID.String()))
 }
 
 func writeListTVDetails(sb *strings.Builder, r domain.Reminder) {
 	if ch := r.Spec.Event.Params["channel"]; ch != "" {
-		sb.WriteString("   📺 " + escapeMarkdown(truncateRunes(ch, listReminderTitleLimit)) + "\n")
+		sb.WriteString("   • Канал: " + escapeMarkdown(truncateRunes(ch, listReminderTitleLimit)) + "\n")
 	}
 	if r.Spec.LeadTime.Duration > 0 {
-		sb.WriteString("   ⏰ За " + escapeMarkdown(formatDurationRu(r.Spec.LeadTime.Duration)) + "\n")
+		sb.WriteString("   • Уведомить за: " + escapeMarkdown(formatDurationRu(r.Spec.LeadTime.Duration)) + "\n")
 	}
 }
 
 func writeListActions(sb *strings.Builder, r domain.Reminder) {
 	id := r.ID.String()
-	sb.WriteString(fmt.Sprintf("   ▶️ `/run %s`\n", id))
-	command, icon := "pause", "⏸"
+	sb.WriteString("   • Действия:\n")
+	sb.WriteString(fmt.Sprintf("     `/run %s`\n", id))
+	command := "pause"
 	if r.Status != domain.StatusActive {
-		command, icon = "resume", "⏯"
+		command = "resume"
 	}
-	sb.WriteString(fmt.Sprintf("   %s `/%s %s`   🗑 `/remove %s`\n", icon, command, id, id))
+	sb.WriteString(fmt.Sprintf("     `/%s %s`\n", command, id))
+	sb.WriteString(fmt.Sprintf("     `/remove %s`\n", id))
 }
 
 func splitFeedURLs(raw string) []string {

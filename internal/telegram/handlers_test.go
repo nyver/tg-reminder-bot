@@ -130,12 +130,14 @@ func TestWriteListReminderRSSIsCompact(t *testing.T) {
 		t.Fatalf("list item should not repeat long RSS URLs/raw text, got:\n%s", got)
 	}
 	for _, want := range []string{
-		"*RSS дайджест: openai\\.com, blog\\.google, theverge\\.com*",
-		"`активно`",
-		"Рассылка: `18:00` · топ\\-7",
-		"Ленты \\(3\\): openai\\.com, blog\\.google, theverge\\.com",
+		"*1\\. RSS дайджест: openai\\.com, blog\\.google, theverge\\.com*",
+		"Статус: `активно`",
+		"• Рассылка: `18:00` · топ\\-7",
+		"• Ленты \\(3\\): openai\\.com, blog\\.google, theverge\\.com",
+		"• Действия:",
 		"`/run 04e914b7-adb0-48ad-ae87-690f6550751a`",
 		"`/pause 04e914b7-adb0-48ad-ae87-690f6550751a`",
+		"`/remove 04e914b7-adb0-48ad-ae87-690f6550751a`",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("list item missing %q in:\n%s", want, got)
