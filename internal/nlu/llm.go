@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -98,6 +99,7 @@ func openRouterCompleter(apiKey string, models []string, baseURL string, timeout
 	}
 	client := &http.Client{Timeout: timeout}
 	endpoint := strings.TrimRight(baseURL, "/") + "/chat/completions"
+	modelTimeout := openRouterModelTimeout(timeout)
 
 	return func(ctx context.Context, prompt string) (string, error) {
 		var lastErr error
@@ -109,12 +111,15 @@ func openRouterCompleter(apiKey string, models []string, baseURL string, timeout
 				"fallback", i > 0,
 				"model_index", i,
 			)
-			content, tryNextModel, err := callOpenRouterModel(ctx, client, endpoint, apiKey, model, prompt, maxTokens, maxServerRetries, log, component)
+			modelCtx, cancel := context.WithTimeout(ctx, modelTimeout)
+			content, tryNextModel, err := callOpenRouterModel(modelCtx, client, endpoint, apiKey, model, prompt, maxTokens, maxServerRetries, log, component)
+			modelDeadlineExceeded := errors.Is(modelCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil
+			cancel()
 			if err == nil {
 				return content, nil
 			}
 			lastErr = err
-			if tryNextModel {
+			if tryNextModel || modelDeadlineExceeded {
 				if i+1 < len(models) {
 					log.Info("llm fallback",
 						"component", component,
@@ -130,6 +135,14 @@ func openRouterCompleter(apiKey string, models []string, baseURL string, timeout
 		}
 		return "", lastErr
 	}
+}
+
+func openRouterModelTimeout(total time.Duration) time.Duration {
+	const maxPerModel = 12 * time.Second
+	if total <= 0 || total > maxPerModel {
+		return maxPerModel
+	}
+	return total
 }
 
 // callOpenRouterModel calls one specific model, retrying on 5xx.

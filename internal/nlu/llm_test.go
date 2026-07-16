@@ -165,6 +165,51 @@ func TestOpenRouterParserFallbackOnEmptyContent(t *testing.T) {
 	}
 }
 
+func TestOpenRouterParserFallbackOnSlowModel(t *testing.T) {
+	var requests atomic.Int32
+
+	const primaryModel = "slow/model"
+	const fallbackModel = "fast/model"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		idx := requests.Add(1)
+		var req struct {
+			Model string `json:"model"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode body: %v", err)
+		}
+		if idx == 1 {
+			if req.Model != primaryModel {
+				t.Errorf("request 1 model = %q, want %q", req.Model, primaryModel)
+			}
+			<-r.Context().Done()
+			return
+		}
+		if req.Model != fallbackModel {
+			t.Errorf("request 2 model = %q, want %q", req.Model, fallbackModel)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"kind\":\"absolute\",\"message\":\"test\",\"confidence\":0.95}"}}]}`))
+	}))
+	defer server.Close()
+
+	parser, err := NewConfiguredLLMParser("openrouter", "test-key", primaryModel, server.URL, []string{fallbackModel}, 20*time.Millisecond, 0, time.UTC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := parser.Parse(context.Background(), "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Confidence != 0.95 {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+	if n := requests.Load(); n != 2 {
+		t.Fatalf("total requests = %d, want 2", n)
+	}
+}
+
 func TestOpenRouterParserLogsInitialModelAndFallback(t *testing.T) {
 	var requests atomic.Int32
 
