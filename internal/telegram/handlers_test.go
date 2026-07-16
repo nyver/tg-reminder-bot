@@ -1,10 +1,12 @@
 package telegram
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/nyver2k/remindertgbot/internal/domain"
 	"github.com/nyver2k/remindertgbot/internal/nlu"
 	"github.com/nyver2k/remindertgbot/internal/provider"
@@ -92,6 +94,50 @@ func TestBuildTravelDigestReminder(t *testing.T) {
 	}
 	if rem.NextEvalAt == nil {
 		t.Fatal("expected NextEvalAt to be set")
+	}
+	if !rem.NextEvalAt.After(now) {
+		t.Fatalf("NextEvalAt = %v, want after creation time %v", rem.NextEvalAt, now)
+	}
+	if got := rem.NextEvalAt.In(time.FixedZone("MSK", 3*60*60)).Format("15:04"); got != "09:00" {
+		t.Fatalf("NextEvalAt local time = %s, want 09:00", got)
+	}
+}
+
+func TestWriteListReminderRSSIsCompact(t *testing.T) {
+	id := uuid.MustParse("04e914b7-adb0-48ad-ae87-690f6550751a")
+	rem := domain.Reminder{
+		ID:      id,
+		RawText: "каждый день в 18:00 создай дайджест новостей на основе https://openai.com/news/rss.xml, https://blog.google/technology/ai/rss/",
+		Status:  domain.StatusActive,
+		Spec: domain.Spec{
+			Trigger: domain.TriggerDigest,
+			TopN:    7,
+			Event: domain.EventSpec{
+				Type: "rss",
+				Params: map[string]string{
+					"url": "https://openai.com/news/rss.xml,https://blog.google/technology/ai/rss/,https://www.theverge.com/rss/ai-artificial-intelligence/index.xml",
+				},
+			},
+		},
+		EvalCron: "0 18 * * *",
+	}
+
+	var sb strings.Builder
+	(&Handler{}).writeListReminder(context.Background(), &sb, 1, rem, time.UTC)
+	got := sb.String()
+
+	if strings.Contains(got, "https://openai.com/news/rss.xml") || strings.Contains(got, rem.RawText) {
+		t.Fatalf("list item should not repeat long RSS URLs/raw text, got:\n%s", got)
+	}
+	for _, want := range []string{
+		"*RSS дайджест: openai\\.com, blog\\.google, theverge\\.com*",
+		"Рассылка: `18:00` · топ\\-7",
+		"Ленты \\(3\\): openai\\.com, blog\\.google, theverge\\.com",
+		"`/run 04e914b7-adb0-48ad-ae87-690f6550751a`",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("list item missing %q in:\n%s", want, got)
+		}
 	}
 }
 
@@ -300,6 +346,12 @@ func TestBuildReminderRSSDigestFromFreeText(t *testing.T) {
 	}
 	if rem.NextEvalAt == nil {
 		t.Fatal("expected NextEvalAt to be set")
+	}
+	if !rem.NextEvalAt.After(now) {
+		t.Fatalf("NextEvalAt = %v, want after creation time %v", rem.NextEvalAt, now)
+	}
+	if got := rem.NextEvalAt.In(time.FixedZone("MSK", 3*60*60)).Format("15:04"); got != "18:00" {
+		t.Fatalf("NextEvalAt local time = %s, want 18:00", got)
 	}
 }
 

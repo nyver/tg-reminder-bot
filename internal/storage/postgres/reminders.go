@@ -220,15 +220,21 @@ func (r *ReminderRepo) Remove(ctx context.Context, userID int64, id uuid.UUID) e
 	return nil
 }
 
-// MarkConditionalDue resets next_eval_at to now for all active conditional
-// reminders so the watcher evaluates them immediately on startup.
+// MarkConditionalDue resets next_eval_at to now for active conditional
+// reminders that need immediate probing on startup. Digest reminders keep
+// their cron-derived next_eval_at so startup does not send an extra digest.
 // Uses the dialect-native NOW() so the stored format matches LeaseDue's comparison.
 func (r *ReminderRepo) MarkConditionalDue(ctx context.Context) error {
 	now := r.db.Now()
+	triggerExpr := `spec->>'trigger'`
+	if r.db.Dialect == "sqlite" {
+		triggerExpr = `json_extract(spec, '$.trigger')`
+	}
 	_, err := r.db.ExecContext(ctx, fmt.Sprintf(
 		`UPDATE reminders
 		 SET next_eval_at=%s, locked_at=NULL, locked_by=NULL
-		 WHERE status='active' AND kind='conditional'`, now))
+		 WHERE status='active' AND kind='conditional'
+		   AND COALESCE(%s, '') <> 'digest'`, now, triggerExpr))
 	return err
 }
 

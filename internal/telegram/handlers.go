@@ -138,46 +138,142 @@ func (h *Handler) handleList(c tele.Context) error {
 	}
 
 	var sb strings.Builder
-	sb.WriteString("*Ваши напоминания:*\n\n")
+	sb.WriteString(fmt.Sprintf("*Ваши напоминания:* %d\n\n", len(rems)))
 	for i, r := range rems {
-		sb.WriteString(fmt.Sprintf("%d\\. %s \\[%s\\]\n",
-			i+1, escapeMarkdown(r.RawText), string(r.Status)))
-		if r.Spec.Trigger == domain.TriggerThreshold && r.Spec.Event.Type == "price" {
-			if h.history != nil {
-				if obs, err := h.history.Last(ctx, r.ID); err == nil && obs != nil && obs.Value > 0 {
-					title := obs.Title
-					if title == "" {
-						title = r.Spec.Event.Title
-					}
-					if title != "" {
-						sb.WriteString("📌 " + escapeMarkdown(title) + "\n")
-					}
-					at := obs.ObservedAt.In(loc).Format("02.01 15:04")
-					sb.WriteString(fmt.Sprintf("💰 Последняя цена: *%s* \\(%s\\)\n",
-						escapeMarkdown(formatPriceRub(obs.Value, obs.Currency)),
-						escapeMarkdown(at),
-					))
-				} else if title := r.Spec.Event.Title; title != "" {
-					sb.WriteString("📌 " + escapeMarkdown(title) + "\n")
-				}
-			} else if title := r.Spec.Event.Title; title != "" {
-				sb.WriteString("📌 " + escapeMarkdown(title) + "\n")
-			}
-			sb.WriteString(fmt.Sprintf("`/refresh %s`\n", r.ID.String()))
-		}
-		if r.Spec.Trigger == domain.TriggerDigest && r.Spec.Event.Type == "rss" {
-			for _, u := range strings.Split(r.Spec.Event.Params["url"], ",") {
-				if u = strings.TrimSpace(u); u != "" {
-					sb.WriteString("📰 " + escapeMarkdown(u) + "\n")
-				}
-			}
-			if r.EvalCron != "" {
-				sb.WriteString(fmt.Sprintf("🕐 Рассылка: `%s`\n", escapeMarkdown(cronToHHMM(r.EvalCron))))
-			}
-		}
-		sb.WriteString(fmt.Sprintf("`/run %s`\n`/cancel %s`\n`/remove %s`\n\n", r.ID.String(), r.ID.String(), r.ID.String()))
+		h.writeListReminder(ctx, &sb, i+1, r, loc)
 	}
 	return c.Send(sb.String(), tele.ModeMarkdownV2)
+}
+
+func (h *Handler) writeListReminder(ctx context.Context, sb *strings.Builder, index int, r domain.Reminder, loc *time.Location) {
+	sb.WriteString(fmt.Sprintf("%d\\. *%s* `%s`\n", index, escapeMarkdown(listReminderTitle(r)), escapeMarkdown(statusLabel(r.Status))))
+
+	switch {
+	case r.Spec.Trigger == domain.TriggerDigest && r.Spec.Event.Type == "rss":
+		writeListRSSDetails(sb, r)
+	case r.Spec.Trigger == domain.TriggerThreshold && r.Spec.Event.Type == "price":
+		h.writeListPriceDetails(ctx, sb, r, loc)
+	case r.Spec.Trigger == domain.TriggerAnchor && r.Spec.Event.Type == "tv_program":
+		writeListTVDetails(sb, r)
+	case r.EvalCron != "":
+		if line := formatCronLineRu(r.EvalCron); line != "" {
+			sb.WriteString("   🕐 " + escapeMarkdown(line) + "\n")
+		}
+	}
+
+	writeListActions(sb, r)
+	sb.WriteByte('\n')
+}
+
+func listReminderTitle(r domain.Reminder) string {
+	switch {
+	case r.Spec.Trigger == domain.TriggerDigest && r.Spec.Event.Type == "rss":
+		if title := strings.TrimSpace(r.Spec.Event.Title); title != "" {
+			return "RSS дайджест: " + title
+		}
+		if urls := splitFeedURLs(r.Spec.Event.Params["url"]); len(urls) > 0 {
+			return "RSS дайджест: " + feedHostsDisplay(urls)
+		}
+		return "RSS дайджест"
+	case r.Spec.Trigger == domain.TriggerAnchor && r.Spec.Event.Type == "tv_program":
+		if r.Spec.Event.Title != "" {
+			return "ТВ: " + r.Spec.Event.Title
+		}
+	case r.Spec.Trigger == domain.TriggerThreshold && r.Spec.Event.Type == "price":
+		if r.Spec.Event.Title != "" {
+			return "Цена: " + r.Spec.Event.Title
+		}
+	case r.Spec.Message != "":
+		return r.Spec.Message
+	}
+	return r.RawText
+}
+
+func writeListRSSDetails(sb *strings.Builder, r domain.Reminder) {
+	feeds := splitFeedURLs(r.Spec.Event.Params["url"])
+	if r.EvalCron != "" {
+		sb.WriteString(fmt.Sprintf("   🕐 Рассылка: `%s`", escapeMarkdown(cronToHHMM(r.EvalCron))))
+		if topN := orDefaultInt(r.Spec.TopN, rssDefaultTopN); topN > 0 {
+			sb.WriteString(fmt.Sprintf(" · топ\\-%d", topN))
+		}
+		sb.WriteByte('\n')
+	}
+	if len(feeds) > 0 {
+		sb.WriteString(fmt.Sprintf("   📰 Ленты \\(%d\\): %s\n", len(feeds), escapeMarkdown(feedHostsDisplay(feeds))))
+	}
+}
+
+func (h *Handler) writeListPriceDetails(ctx context.Context, sb *strings.Builder, r domain.Reminder, loc *time.Location) {
+	if h.history != nil {
+		if obs, err := h.history.Last(ctx, r.ID); err == nil && obs != nil && obs.Value > 0 {
+			title := obs.Title
+			if title == "" {
+				title = r.Spec.Event.Title
+			}
+			if title != "" && title != listReminderTitle(r) {
+				sb.WriteString("   📌 " + escapeMarkdown(title) + "\n")
+			}
+			at := obs.ObservedAt.In(loc).Format("02.01 15:04")
+			sb.WriteString(fmt.Sprintf("   💰 Последняя цена: *%s* \\(%s\\)\n",
+				escapeMarkdown(formatPriceRub(obs.Value, obs.Currency)),
+				escapeMarkdown(at),
+			))
+		}
+	} else if title := r.Spec.Event.Title; title != "" {
+		sb.WriteString("   📌 " + escapeMarkdown(title) + "\n")
+	}
+	if u := r.Spec.Event.Params["url"]; u != "" {
+		sb.WriteString("   🔗 " + escapeMarkdown(feedHost(u)) + "\n")
+	}
+	sb.WriteString(fmt.Sprintf("   🔄 `/refresh %s`\n", r.ID.String()))
+}
+
+func writeListTVDetails(sb *strings.Builder, r domain.Reminder) {
+	if ch := r.Spec.Event.Params["channel"]; ch != "" {
+		sb.WriteString("   📺 " + escapeMarkdown(ch) + "\n")
+	}
+	if r.Spec.LeadTime.Duration > 0 {
+		sb.WriteString("   ⏰ За " + escapeMarkdown(formatDurationRu(r.Spec.LeadTime.Duration)) + "\n")
+	}
+}
+
+func writeListActions(sb *strings.Builder, r domain.Reminder) {
+	id := r.ID.String()
+	sb.WriteString(fmt.Sprintf("   ▶️ `/run %s`\n", id))
+	sb.WriteString(fmt.Sprintf("   ⏸ `/cancel %s`   🗑 `/remove %s`\n", id, id))
+}
+
+func splitFeedURLs(raw string) []string {
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if u := strings.TrimSpace(part); u != "" {
+			out = append(out, u)
+		}
+	}
+	return out
+}
+
+func statusLabel(status domain.Status) string {
+	switch status {
+	case domain.StatusActive:
+		return "active"
+	case domain.StatusPaused:
+		return "paused"
+	case domain.StatusDone:
+		return "done"
+	case domain.StatusFailed:
+		return "failed"
+	default:
+		return string(status)
+	}
+}
+
+func orDefaultInt(v, def int) int {
+	if v == 0 {
+		return def
+	}
+	return v
 }
 
 func (h *Handler) handleCancel(c tele.Context) error {
@@ -1215,6 +1311,13 @@ func buildReminder(userID int64, rawText string, result *nlu.ParseResult, now ti
 			rem.EvalCron = defaultConditionalCron
 		}
 		next := now.UTC()
+		if result.Spec.Trigger == domain.TriggerDigest {
+			var err error
+			next, err = nextCronAt(rem.EvalCron, now, userTZ)
+			if err != nil {
+				return nil, err
+			}
+		}
 		rem.NextEvalAt = &next
 	default:
 		return nil, fmt.Errorf("unsupported reminder kind %q", kind)
