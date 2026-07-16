@@ -94,6 +94,10 @@ type RSSConfig struct {
 	// the keyword+recency heuristic. Off by default: it adds one LLM call
 	// per digest tick.
 	LLMDigest bool `yaml:"llm_digest"`
+	// ProxyURL routes RSS/Atom fetches through an HTTP(S) or SOCKS5 proxy.
+	// Some feeds block requests from datacenter/VPS IP ranges outright; a
+	// proxy is the only way to reach those. Empty means fetch directly.
+	ProxyURL string `yaml:"proxy_url"`
 }
 
 type SchedulerConfig struct {

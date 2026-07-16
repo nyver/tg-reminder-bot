@@ -15,11 +15,41 @@ import (
 // lookupIPAddr is overridden in tests to avoid depending on real DNS/network.
 var lookupIPAddr = net.DefaultResolver.LookupIPAddr
 
-// SafeClient returns an *http.Client whose DialContext resolves the host and
-// rejects private/loopback/link-local addresses at connect time, closing the
+// SafeClient returns an *http.Client suitable for fetching arbitrary
+// user-supplied URLs.
+//
+// With proxyURL empty, its DialContext resolves the host and rejects
+// private/loopback/link-local addresses at connect time, closing the
 // DNS-rebinding window that exists when validation and dialing are separate
 // steps.
-func SafeClient(timeout time.Duration) *http.Client {
+//
+// With proxyURL set (http, https, socks5 or socks5h), requests are routed
+// through that proxy instead — e.g. to reach a feed whose host blocks this
+// server's own IP range. The proxy, not this process, resolves and connects
+// to the destination, so the direct-dial SSRF guard above does not apply to
+// proxied requests; this mirrors provider/price's existing headless+proxy
+// mode, which has the same trust boundary (the operator who configures
+// proxy_url is trusted not to point it at an SSRF pivot).
+func SafeClient(timeout time.Duration, proxyURL string) (*http.Client, error) {
+	if proxyURL != "" {
+		u, err := url.Parse(proxyURL)
+		if err != nil {
+			return nil, fmt.Errorf("invalid proxy_url: %w", err)
+		}
+		switch u.Scheme {
+		case "http", "https", "socks5", "socks5h":
+		default:
+			return nil, fmt.Errorf("unsupported proxy_url scheme %q (want http, https, socks5 or socks5h)", u.Scheme)
+		}
+		return &http.Client{
+			Timeout: timeout,
+			Transport: &http.Transport{
+				Proxy:           http.ProxyURL(u),
+				IdleConnTimeout: 30 * time.Second,
+			},
+		}, nil
+	}
+
 	dial := func(ctx context.Context, network, addr string) (net.Conn, error) {
 		host, port, err := net.SplitHostPort(addr)
 		if err != nil {
@@ -59,7 +89,7 @@ func SafeClient(timeout time.Duration) *http.Client {
 			DialContext:     dial,
 			IdleConnTimeout: 30 * time.Second,
 		},
-	}
+	}, nil
 }
 
 // dialFirstReachable tries every address in addrs, in order, returning the

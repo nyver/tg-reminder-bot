@@ -104,6 +104,13 @@ providers:
     # keyword+recency heuristic. Adds one LLM call per digest tick; falls
     # back to the heuristic automatically if that call fails.
     llm_digest: false
+    # Proxy for fetching RSS/Atom feeds. Some feeds block requests from
+    # datacenter/VPS IP ranges outright; routing through a proxy is the only
+    # way to reach those. HTTP, HTTPS, and SOCKS5 are supported:
+    #   proxy_url: http://user:pass@proxy.example.com:3128
+    #   proxy_url: socks5://user:pass@proxy.example.com:1080
+    # Empty value — fetch directly, no proxy.
+    proxy_url: ""
 
 scheduler:
   # Interval for finding reminders that are due for evaluation.

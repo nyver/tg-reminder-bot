@@ -407,12 +407,33 @@ providers:
   rss:
     timeout: 15s
     llm_digest: false
+    proxy_url: ""
 ```
 
 | Field | Description | Default |
 | --- | --- | --- |
 | `timeout` | timeout for fetching and parsing one RSS/Atom feed | `15s` |
 | `llm_digest` | use the `nlu:` LLM to rank and summarize digest items instead of the heuristic | `false` |
+| `proxy_url` | HTTP, HTTPS, or SOCKS5 proxy for fetching feeds | `""` (direct) |
+
+Some feeds block requests from datacenter/VPS IP ranges outright — a feed
+that hangs and times out on every attempt from your server, but works fine
+from a browser, is a sign of this. `proxy_url` routes all RSS/Atom fetches
+through a proxy instead:
+
+```yaml
+providers:
+  rss:
+    proxy_url: http://user:pass@proxy.example.com:3128
+    # or: socks5://user:pass@proxy.example.com:1080
+```
+
+Unlike the direct-fetch path, a proxied request is not subject to this
+provider's own SSRF dial guard (see [SSRF protection](#ssrf-protection)
+above) — the proxy, not this process, resolves and connects to the
+destination. The operator who configures `proxy_url` is trusted not to point
+it at an SSRF pivot, the same trust boundary `providers.price.proxy_url`
+already relies on.
 
 ## LLM provider
 

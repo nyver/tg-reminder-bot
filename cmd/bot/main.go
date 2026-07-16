@@ -91,7 +91,12 @@ func main() {
 	airP := travel.NewAirProvider(cfg.Providers.Travel.AirAPIKey, log)
 	railP := travel.NewRailProvider(cfg.Providers.Travel.RailAPIKey, log)
 	registry.RegisterSearch(travel.NewAggregator(log, airP, railP))
-	registry.RegisterNews(rss.New(cfg.Providers.RSS.Timeout, log))
+	rssProvider, err := rss.New(cfg.Providers.RSS.Timeout, cfg.Providers.RSS.ProxyURL, log)
+	if err != nil {
+		log.Error("rss provider init", "err", err)
+		os.Exit(1)
+	}
+	registry.RegisterNews(rssProvider)
 
 	evaluator := scheduler.NewEvaluator(registry, observationRepo, clock.Real(), cfg.Providers.Travel.MaxHorizonDays, log)
 	if cfg.Providers.RSS.LLMDigest {

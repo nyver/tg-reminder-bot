@@ -30,17 +30,27 @@ type Provider struct {
 	log        *slog.Logger
 }
 
-func New(timeout time.Duration, log *slog.Logger) *Provider {
+// New builds a Provider. proxyURL is optional: some feeds block requests
+// from datacenter/VPS IP ranges outright, and routing through an HTTP(S) or
+// SOCKS5 proxy is the only way to reach them (see netsafe.SafeClient).
+func New(timeout time.Duration, proxyURL string, log *slog.Logger) (*Provider, error) {
 	if timeout <= 0 {
 		timeout = 15 * time.Second
 	}
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Provider{
-		httpClient: netsafe.SafeClient(timeout),
-		log:        log,
+	client, err := netsafe.SafeClient(timeout, proxyURL)
+	if err != nil {
+		return nil, fmt.Errorf("rss provider: %w", err)
 	}
+	if proxyURL != "" {
+		log.Info("rss: proxy configured")
+	}
+	return &Provider{
+		httpClient: client,
+		log:        log,
+	}, nil
 }
 
 func (p *Provider) Type() string { return providerType }

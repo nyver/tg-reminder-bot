@@ -3,6 +3,7 @@ package netsafe
 import (
 	"context"
 	"net"
+	"net/http"
 	"testing"
 )
 
@@ -113,6 +114,47 @@ func TestDialFirstReachableReturnsLastErrorWhenAllFail(t *testing.T) {
 
 	if _, err := dialFirstReachable(context.Background(), "tcp", addrs, "443", dial); err == nil {
 		t.Fatal("expected an error when every resolved address fails")
+	}
+}
+
+func TestSafeClientNoProxy(t *testing.T) {
+	client, err := SafeClient(0, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.Transport.(*http.Transport).Proxy != nil {
+		t.Fatal("expected no proxy configured")
+	}
+}
+
+func TestSafeClientAcceptsSupportedProxySchemes(t *testing.T) {
+	for _, u := range []string{
+		"http://proxy.example.com:3128",
+		"https://proxy.example.com:3128",
+		"socks5://proxy.example.com:1080",
+		"socks5h://proxy.example.com:1080",
+	} {
+		t.Run(u, func(t *testing.T) {
+			client, err := SafeClient(5, u)
+			if err != nil {
+				t.Fatalf("unexpected error for %q: %v", u, err)
+			}
+			if client.Transport.(*http.Transport).Proxy == nil {
+				t.Fatal("expected a proxy function to be configured")
+			}
+		})
+	}
+}
+
+func TestSafeClientRejectsUnsupportedProxyScheme(t *testing.T) {
+	if _, err := SafeClient(5, "ftp://proxy.example.com:21"); err == nil {
+		t.Fatal("expected an error for an unsupported proxy scheme")
+	}
+}
+
+func TestSafeClientRejectsMalformedProxyURL(t *testing.T) {
+	if _, err := SafeClient(5, "://not-a-url"); err == nil {
+		t.Fatal("expected an error for a malformed proxy_url")
 	}
 }
 

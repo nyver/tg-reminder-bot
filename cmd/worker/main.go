@@ -79,7 +79,12 @@ func main() {
 	agg := travel.NewAggregator(log, airP, railP)
 	registry.RegisterSearch(agg)
 
-	registry.RegisterNews(rss.New(cfg.Providers.RSS.Timeout, log))
+	rssProvider, err := rss.New(cfg.Providers.RSS.Timeout, cfg.Providers.RSS.ProxyURL, log)
+	if err != nil {
+		log.Error("rss provider init", "err", err)
+		os.Exit(1)
+	}
+	registry.RegisterNews(rssProvider)
 
 	// Evaluator.
 	evaluator := scheduler.NewEvaluator(registry, obsRepo, clock.Real(), cfg.Providers.Travel.MaxHorizonDays, log)
