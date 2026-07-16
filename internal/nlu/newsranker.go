@@ -46,7 +46,7 @@ func NewConfiguredNewsRanker(providerName, apiKey, model, baseURL string, fallba
 		}}, nil
 	case "openrouter":
 		models := append([]string{model}, fallbackModels...)
-		return &NewsRanker{complete: openRouterCompleter(apiKey, models, baseURL, timeout, modelTimeout, maxTokens, log, "news_ranker")}, nil
+		return &NewsRanker{complete: openRouterCompleter(apiKey, models, baseURL, timeout, modelTimeout, maxTokens, log, "news_ranker", validateRankedItemsContent)}, nil
 	default:
 		return nil, fmt.Errorf("unsupported NLU provider %q", providerName)
 	}
@@ -83,13 +83,7 @@ func (r *NewsRanker) Rank(ctx context.Context, candidates []provider.NewsItem, t
 	if err != nil {
 		return nil, fmt.Errorf("news ranker: %w", err)
 	}
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return nil, fmt.Errorf("news ranker: empty model response")
-	}
-	raw = sanitizeJSONStrings(raw)
-
-	picked, err := decodeRankedItems(raw)
+	picked, raw, err := parseRankedItemsContent(raw)
 	if err != nil {
 		return nil, fmt.Errorf("news ranker: json unmarshal: %w (raw: %.200s)", err, raw)
 	}
@@ -148,6 +142,27 @@ func buildNewsRankPrompt(candidates []provider.NewsItem, topN int) string {
 		}
 	}
 	return sb.String()
+}
+
+func validateRankedItemsContent(raw string) error {
+	picked, _, err := parseRankedItemsContent(raw)
+	if err != nil {
+		return err
+	}
+	if len(picked) == 0 {
+		return fmt.Errorf("no ranked items in response")
+	}
+	return nil
+}
+
+func parseRankedItemsContent(raw string) ([]rankedItem, string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, raw, fmt.Errorf("empty model response")
+	}
+	raw = sanitizeJSONStrings(raw)
+	picked, err := decodeRankedItems(raw)
+	return picked, raw, err
 }
 
 func decodeRankedItems(raw string) ([]rankedItem, error) {

@@ -3,8 +3,12 @@ package nlu
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/nyver2k/remindertgbot/internal/provider"
 )
@@ -50,6 +54,54 @@ func TestNewsRankerAcceptsItemsObject(t *testing.T) {
 	}
 	if len(out) != 1 || out[0].Title != "Заголовок" || out[0].Summary != "Саммари." {
 		t.Fatalf("out = %+v", out)
+	}
+}
+
+func TestNewsRankerOpenRouterFallbackOnMalformedJSON(t *testing.T) {
+	var requests atomic.Int32
+
+	const primaryModel = "bad/model"
+	const fallbackModel = "good/model"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		idx := requests.Add(1)
+		var req struct {
+			Model string `json:"model"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch idx {
+		case 1:
+			if req.Model != primaryModel {
+				t.Errorf("request 1 model = %q, want %q", req.Model, primaryModel)
+			}
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"items\":[{\"link\":\"https://example.com/1\",\"summary\":\"broken\"}"}}]}`))
+		case 2:
+			if req.Model != fallbackModel {
+				t.Errorf("request 2 model = %q, want %q", req.Model, fallbackModel)
+			}
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"items\":[{\"link\":\"https://example.com/1\",\"summary\":\"ok\"}]}"}}]}`))
+		default:
+			t.Errorf("unexpected request %d", idx)
+		}
+	}))
+	defer server.Close()
+
+	ranker, err := NewConfiguredNewsRanker("openrouter", "test-key", primaryModel, server.URL, []string{fallbackModel}, time.Second, time.Second, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := ranker.Rank(context.Background(), []provider.NewsItem{{Title: "1", Link: "https://example.com/1"}}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 1 || out[0].Summary != "ok" {
+		t.Fatalf("out = %+v, want fallback summary", out)
+	}
+	if n := requests.Load(); n != 2 {
+		t.Fatalf("total requests = %d, want 2", n)
 	}
 }
 
