@@ -173,7 +173,7 @@ func (h *Handler) handleList(c tele.Context) error {
 				sb.WriteString(fmt.Sprintf("🕐 Рассылка: `%s`\n", escapeMarkdown(cronToHHMM(r.EvalCron))))
 			}
 		}
-		sb.WriteString(fmt.Sprintf("`/cancel %s`\n`/remove %s`\n\n", r.ID.String(), r.ID.String()))
+		sb.WriteString(fmt.Sprintf("`/run %s`\n`/cancel %s`\n`/remove %s`\n\n", r.ID.String(), r.ID.String(), r.ID.String()))
 	}
 	return c.Send(sb.String(), tele.ModeMarkdownV2)
 }
