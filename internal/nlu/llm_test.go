@@ -210,6 +210,18 @@ func TestOpenRouterParserFallbackOnSlowModel(t *testing.T) {
 	}
 }
 
+func TestOpenRouterModelTimeoutByComponent(t *testing.T) {
+	if got := openRouterModelTimeout(60*time.Second, "nlu_parser"); got != 12*time.Second {
+		t.Fatalf("nlu_parser timeout = %s, want 12s", got)
+	}
+	if got := openRouterModelTimeout(60*time.Second, "news_ranker"); got != 5*time.Second {
+		t.Fatalf("news_ranker timeout = %s, want 5s", got)
+	}
+	if got := openRouterModelTimeout(2*time.Second, "news_ranker"); got != 2*time.Second {
+		t.Fatalf("short configured timeout = %s, want 2s", got)
+	}
+}
+
 func TestOpenRouterParserLogsInitialModelAndFallback(t *testing.T) {
 	var requests atomic.Int32
 

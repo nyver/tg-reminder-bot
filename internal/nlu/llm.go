@@ -99,7 +99,7 @@ func openRouterCompleter(apiKey string, models []string, baseURL string, timeout
 	}
 	client := &http.Client{Timeout: timeout}
 	endpoint := strings.TrimRight(baseURL, "/") + "/chat/completions"
-	modelTimeout := openRouterModelTimeout(timeout)
+	modelTimeout := openRouterModelTimeout(timeout, component)
 
 	return func(ctx context.Context, prompt string) (string, error) {
 		var lastErr error
@@ -110,6 +110,7 @@ func openRouterCompleter(apiKey string, models []string, baseURL string, timeout
 				"model", model,
 				"fallback", i > 0,
 				"model_index", i,
+				"model_timeout", modelTimeout.String(),
 			)
 			modelCtx, cancel := context.WithTimeout(ctx, modelTimeout)
 			content, tryNextModel, err := callOpenRouterModel(modelCtx, client, endpoint, apiKey, model, prompt, maxTokens, maxServerRetries, log, component)
@@ -137,8 +138,11 @@ func openRouterCompleter(apiKey string, models []string, baseURL string, timeout
 	}
 }
 
-func openRouterModelTimeout(total time.Duration) time.Duration {
-	const maxPerModel = 12 * time.Second
+func openRouterModelTimeout(total time.Duration, component string) time.Duration {
+	maxPerModel := 12 * time.Second
+	if component == "news_ranker" {
+		maxPerModel = 5 * time.Second
+	}
 	if total <= 0 || total > maxPerModel {
 		return maxPerModel
 	}
