@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestLoadYAMLUsesSQLiteDefaults(t *testing.T) {
@@ -27,6 +28,9 @@ func TestLoadYAMLUsesSQLiteDefaults(t *testing.T) {
 	}
 	if cfg.Providers.TV.BaseURL != "https://api.epgservice.ru" || cfg.Providers.TV.Timeout == 0 {
 		t.Fatalf("unexpected TV config: %+v", cfg.Providers.TV)
+	}
+	if cfg.NLU.OpenRouter.ModelTimeout != 30*time.Second {
+		t.Fatalf("model_timeout = %s, want 30s", cfg.NLU.OpenRouter.ModelTimeout)
 	}
 }
 
@@ -61,6 +65,15 @@ func TestValidateRejectsInvalidPriceCron(t *testing.T) {
 func TestValidateRejectsNonPositiveTicks(t *testing.T) {
 	cfg := defaults()
 	cfg.Scheduler.WatcherTick = 0
+
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected validation error")
+	}
+}
+
+func TestValidateRejectsNonPositiveOpenRouterModelTimeout(t *testing.T) {
+	cfg := defaults()
+	cfg.NLU.OpenRouter.ModelTimeout = 0
 
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected validation error")

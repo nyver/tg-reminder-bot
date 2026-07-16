@@ -45,6 +45,7 @@ type OpenRouterConfig struct {
 	Model          string        `yaml:"model"`
 	FallbackModels []string      `yaml:"fallback_models"`
 	Timeout        time.Duration `yaml:"timeout"`
+	ModelTimeout   time.Duration `yaml:"model_timeout"`
 	MaxTokens      int           `yaml:"max_tokens"`
 }
 
@@ -170,10 +171,11 @@ func defaults() *Config {
 				Model: "claude-haiku-4-5-20251001",
 			},
 			OpenRouter: OpenRouterConfig{
-				BaseURL:   "https://openrouter.ai/api/v1",
-				Model:     "anthropic/claude-haiku-4.5",
-				Timeout:   60 * time.Second,
-				MaxTokens: 1024,
+				BaseURL:      "https://openrouter.ai/api/v1",
+				Model:        "anthropic/claude-haiku-4.5",
+				Timeout:      60 * time.Second,
+				ModelTimeout: 30 * time.Second,
+				MaxTokens:    1024,
 				FallbackModels: []string{
 					"mistralai/mistral-7b-instruct:free",
 					"meta-llama/llama-3.2-3b-instruct:free",
@@ -283,6 +285,9 @@ func (cfg *Config) Validate() error {
 	}
 	if cfg.NLU.OpenRouter.Timeout <= 0 {
 		return fmt.Errorf("config: nlu.openrouter.timeout must be positive")
+	}
+	if cfg.NLU.OpenRouter.ModelTimeout <= 0 {
+		return fmt.Errorf("config: nlu.openrouter.model_timeout must be positive")
 	}
 	if cfg.NLU.OpenRouter.MaxTokens <= 0 {
 		return fmt.Errorf("config: nlu.openrouter.max_tokens must be positive")

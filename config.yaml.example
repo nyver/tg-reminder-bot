@@ -35,6 +35,8 @@ nlu:
       - meta-llama/llama-3.3-70b-instruct:free
     # Overall timeout for a single LLM call.
     timeout: 60s
+    # Timeout for one model attempt before trying the next fallback model.
+    model_timeout: 30s
     # Maximum model response size in tokens.
     max_tokens: 1024
 

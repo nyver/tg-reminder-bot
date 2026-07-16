@@ -50,7 +50,7 @@ func NewLLMParser(apiKey string, loc *time.Location) *LLMParser {
 }
 
 // NewConfiguredLLMParser creates an Anthropic or OpenRouter-backed parser.
-func NewConfiguredLLMParser(provider, apiKey, model, baseURL string, fallbackModels []string, timeout time.Duration, maxTokens int, loc *time.Location, logs ...*slog.Logger) (*LLMParser, error) {
+func NewConfiguredLLMParser(provider, apiKey, model, baseURL string, fallbackModels []string, timeout, modelTimeout time.Duration, maxTokens int, loc *time.Location, logs ...*slog.Logger) (*LLMParser, error) {
 	if loc == nil {
 		loc = time.UTC
 	}
@@ -77,7 +77,7 @@ func NewConfiguredLLMParser(provider, apiKey, model, baseURL string, fallbackMod
 			return nil, fmt.Errorf("invalid OpenRouter base URL: %w", err)
 		}
 		models := append([]string{model}, fallbackModels...)
-		return &LLMParser{model: model, loc: loc, complete: openRouterCompleter(apiKey, models, baseURL, timeout, maxTokens, log, "nlu_parser")}, nil
+		return &LLMParser{model: model, loc: loc, complete: openRouterCompleter(apiKey, models, baseURL, timeout, modelTimeout, maxTokens, log, "nlu_parser")}, nil
 	default:
 		return nil, fmt.Errorf("unsupported NLU provider %q", provider)
 	}
@@ -89,7 +89,7 @@ func NewConfiguredLLMParser(provider, apiKey, model, baseURL string, fallbackMod
 // up to maxServerRetries times with exponential back-off. Any other error
 // (auth, malformed request, etc.) applies to every model equally, so it
 // propagates immediately instead of cycling through the rest of the list.
-func openRouterCompleter(apiKey string, models []string, baseURL string, timeout time.Duration, maxTokens int, log *slog.Logger, component string) func(context.Context, string) (string, error) {
+func openRouterCompleter(apiKey string, models []string, baseURL string, timeout, modelTimeout time.Duration, maxTokens int, log *slog.Logger, component string) func(context.Context, string) (string, error) {
 	const maxServerRetries = 2
 	if timeout <= 0 {
 		timeout = 60 * time.Second
@@ -99,7 +99,7 @@ func openRouterCompleter(apiKey string, models []string, baseURL string, timeout
 	}
 	client := &http.Client{Timeout: timeout}
 	endpoint := strings.TrimRight(baseURL, "/") + "/chat/completions"
-	modelTimeout := openRouterModelTimeout(timeout, component)
+	modelTimeout = openRouterModelTimeout(timeout, modelTimeout)
 
 	return func(ctx context.Context, prompt string) (string, error) {
 		var lastErr error
@@ -138,15 +138,14 @@ func openRouterCompleter(apiKey string, models []string, baseURL string, timeout
 	}
 }
 
-func openRouterModelTimeout(total time.Duration, component string) time.Duration {
-	maxPerModel := 12 * time.Second
-	if component == "news_ranker" {
-		maxPerModel = 5 * time.Second
+func openRouterModelTimeout(total, configured time.Duration) time.Duration {
+	if configured <= 0 {
+		configured = 30 * time.Second
 	}
-	if total <= 0 || total > maxPerModel {
-		return maxPerModel
+	if total > 0 && total < configured {
+		return total
 	}
-	return total
+	return configured
 }
 
 // callOpenRouterModel calls one specific model, retrying on 5xx.

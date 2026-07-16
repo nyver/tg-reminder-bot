@@ -431,7 +431,7 @@ func (h *Handler) handleRefresh(c tele.Context) error {
 // per-day idempotency key a scheduled digest uses, and it never disturbs the
 // reminder's own NextEvalAt/cron progression.
 func (h *Handler) handleRun(c tele.Context) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), manualRunTimeout)
 	defer cancel()
 	args := strings.TrimSpace(c.Message().Payload)
 	if args == "" {
@@ -455,7 +455,7 @@ func (h *Handler) handleRun(c tele.Context) error {
 
 	_ = c.Bot().Notify(c.Sender(), tele.Typing)
 
-	runCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	runCtx, cancel := context.WithTimeout(ctx, manualRunTimeout)
 	defer cancel()
 	planned, err := h.evaluator.Evaluate(runCtx, *rem)
 	if err != nil {
@@ -1360,6 +1360,7 @@ const (
 	// handlerTimeout caps the total wall time of a single Telegram handler.
 	// Prevents goroutine leaks when DB or external calls hang indefinitely.
 	handlerTimeout           = 15 * time.Second
+	manualRunTimeout         = 3 * time.Minute
 	telegramListMessageLimit = 3500
 	listReminderTitleLimit   = 240
 )

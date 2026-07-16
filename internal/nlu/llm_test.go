@@ -53,7 +53,7 @@ func TestOpenRouterParser_fallbackOn429(t *testing.T) {
 	}))
 	defer server.Close()
 
-	parser, err := NewConfiguredLLMParser("openrouter", "test-key", primaryModel, server.URL, []string{fallbackModel}, 0, 0, time.UTC)
+	parser, err := NewConfiguredLLMParser("openrouter", "test-key", primaryModel, server.URL, []string{fallbackModel}, 0, 0, 0, time.UTC)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +102,7 @@ func TestOpenRouterParser_fallbackOn404(t *testing.T) {
 	}))
 	defer server.Close()
 
-	parser, err := NewConfiguredLLMParser("openrouter", "test-key", primaryModel, server.URL, []string{fallbackModel}, 0, 0, time.UTC)
+	parser, err := NewConfiguredLLMParser("openrouter", "test-key", primaryModel, server.URL, []string{fallbackModel}, 0, 0, 0, time.UTC)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,7 +149,7 @@ func TestOpenRouterParserFallbackOnEmptyContent(t *testing.T) {
 	}))
 	defer server.Close()
 
-	parser, err := NewConfiguredLLMParser("openrouter", "test-key", primaryModel, server.URL, []string{fallbackModel}, 0, 0, time.UTC)
+	parser, err := NewConfiguredLLMParser("openrouter", "test-key", primaryModel, server.URL, []string{fallbackModel}, 0, 0, 0, time.UTC)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,7 +194,7 @@ func TestOpenRouterParserFallbackOnSlowModel(t *testing.T) {
 	}))
 	defer server.Close()
 
-	parser, err := NewConfiguredLLMParser("openrouter", "test-key", primaryModel, server.URL, []string{fallbackModel}, 20*time.Millisecond, 0, time.UTC)
+	parser, err := NewConfiguredLLMParser("openrouter", "test-key", primaryModel, server.URL, []string{fallbackModel}, 200*time.Millisecond, 20*time.Millisecond, 0, time.UTC)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -210,15 +210,15 @@ func TestOpenRouterParserFallbackOnSlowModel(t *testing.T) {
 	}
 }
 
-func TestOpenRouterModelTimeoutByComponent(t *testing.T) {
-	if got := openRouterModelTimeout(60*time.Second, "nlu_parser"); got != 12*time.Second {
-		t.Fatalf("nlu_parser timeout = %s, want 12s", got)
+func TestOpenRouterModelTimeout(t *testing.T) {
+	if got := openRouterModelTimeout(60*time.Second, 0); got != 30*time.Second {
+		t.Fatalf("default model timeout = %s, want 30s", got)
 	}
-	if got := openRouterModelTimeout(60*time.Second, "news_ranker"); got != 5*time.Second {
-		t.Fatalf("news_ranker timeout = %s, want 5s", got)
+	if got := openRouterModelTimeout(60*time.Second, 45*time.Second); got != 45*time.Second {
+		t.Fatalf("configured model timeout = %s, want 45s", got)
 	}
-	if got := openRouterModelTimeout(2*time.Second, "news_ranker"); got != 2*time.Second {
-		t.Fatalf("short configured timeout = %s, want 2s", got)
+	if got := openRouterModelTimeout(2*time.Second, 30*time.Second); got != 2*time.Second {
+		t.Fatalf("model timeout capped by total timeout = %s, want 2s", got)
 	}
 }
 
@@ -243,7 +243,7 @@ func TestOpenRouterParserLogsInitialModelAndFallback(t *testing.T) {
 	log := slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	parser, err := NewConfiguredLLMParser(
 		"openrouter", "test-key", primaryModel, server.URL,
-		[]string{fallbackModel}, 0, 0, time.UTC, log,
+		[]string{fallbackModel}, 0, 0, 0, time.UTC, log,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -282,7 +282,7 @@ func TestOpenRouterParser_allModelsRateLimited(t *testing.T) {
 
 	parser, err := NewConfiguredLLMParser(
 		"openrouter", "test-key", "m1/free", server.URL,
-		[]string{"m2/free", "m3/free"}, 0, 0, time.UTC,
+		[]string{"m2/free", "m3/free"}, 0, 0, 0, time.UTC,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -294,7 +294,7 @@ func TestOpenRouterParser_allModelsRateLimited(t *testing.T) {
 
 func TestConfiguredLLMParserRejectsUnknownProvider(t *testing.T) {
 	t.Parallel()
-	if _, err := NewConfiguredLLMParser("unknown", "", "", "", nil, 0, 0, time.UTC); err == nil {
+	if _, err := NewConfiguredLLMParser("unknown", "", "", "", nil, 0, 0, 0, time.UTC); err == nil {
 		t.Fatal("expected an error")
 	}
 }

@@ -229,7 +229,7 @@ func TestNewsRankerErrorsWhenAllLinksHallucinated(t *testing.T) {
 }
 
 func TestConfiguredNewsRankerRejectsUnknownProvider(t *testing.T) {
-	if _, err := NewConfiguredNewsRanker("unknown", "", "", "", nil, 0, 0); err == nil {
+	if _, err := NewConfiguredNewsRanker("unknown", "", "", "", nil, 0, 0, 0); err == nil {
 		t.Fatal("expected an error")
 	}
 }
