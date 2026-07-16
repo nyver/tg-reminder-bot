@@ -23,6 +23,12 @@ type SearchProvider interface {
 	Search(ctx context.Context, q SearchQuery) ([]Offer, error)
 }
 
+// NewsProvider fetches and importance-ranks items from a news feed (e.g. RSS/Atom).
+type NewsProvider interface {
+	Type() string
+	Fetch(ctx context.Context, q Query) ([]NewsItem, error)
+}
+
 type Query struct {
 	Title  string
 	Params map[string]string
@@ -66,6 +72,15 @@ type TVScheduler interface {
 	// ChannelDaySchedule returns all programmes for the named channel in [from, to).
 	// channelName is the canonical display name resolved from the index.
 	ChannelDaySchedule(ctx context.Context, channel string, from, to time.Time) (channelName string, shows []TVShowtime, err error)
+}
+
+// NewsItem is a single entry from a news feed, importance-ranked by the provider.
+type NewsItem struct {
+	Title       string
+	Link        string
+	Summary     string
+	PublishedAt time.Time
+	Score       float64
 }
 
 type Offer struct {

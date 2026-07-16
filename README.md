@@ -1,45 +1,52 @@
 # Reminder Telegram Bot
 
-Telegram-бот для обычных, периодических и условных напоминаний. Проект включает
-Telegram polling, фоновую обработку напоминаний, HTTP API, метрики Prometheus и
-CLI для миграций и административных операций.
+A Telegram bot for one-off, recurring, and conditional reminders. The project
+includes Telegram polling, background reminder processing, an HTTP API,
+Prometheus metrics, and a CLI for migrations and administrative operations.
 
-SQLite используется по умолчанию. Отдельный сервер базы данных для стандартного
-запуска не требуется. При локальном запуске база хранится в `data/remind.db`,
-в Docker — в `/data/remind.db` внутри persistent volume.
+SQLite is used by default, so no separate database server is required for a
+standard deployment. For a local run the database is stored in
+`data/remind.db`; in Docker it lives in `/data/remind.db` inside a persistent
+volume.
 
-## Компоненты
+## Components
 
-- `bot` принимает команды Telegram и распознаёт текст напоминания.
-- `worker` проверяет условия и отправляет запланированные уведомления.
-- `api` предоставляет HTTP API, health checks и метрики.
-- `remindctl` запускает миграции и административные команды.
+- `bot` accepts Telegram commands and recognizes reminder text.
+- `worker` evaluates conditions and sends scheduled notifications.
+- `api` provides the HTTP API, health checks, and metrics.
+- `remindctl` runs migrations and administrative commands.
 
-## Команды Telegram-бота
+## Telegram bot commands
 
-| Команда | Назначение |
+| Command | Purpose |
 | --- | --- |
-| `/start` | зарегистрировать пользователя и показать краткую справку |
-| `/help` | показать список команд и примеры напоминаний |
-| `/list` | вывести активные и приостановленные напоминания с их ID |
-| `/cancel <id>` | отменить напоминание |
-| `/remove <id>` | безвозвратно удалить напоминание и связанные данные |
-| `/pause <id>` | временно приостановить напоминание |
-| `/resume <id>` | возобновить приостановленное напоминание |
-| `/tz` | показать текущий часовой пояс |
-| `/tz <зона>` | установить часовой пояс в формате IANA, например `Europe/Moscow` |
-| `/tv <программа>` | найти программу на всех каналах на ближайшую неделю |
-| `/tv <программа> \| <канал>` | найти программу на указанном канале на ближайшую неделю |
+| `/start` | register the user and show a short help message |
+| `/help` | show the list of commands and reminder examples |
+| `/list` | list active and paused reminders with their IDs |
+| `/cancel <id>` | cancel a reminder |
+| `/remove <id>` | permanently delete a reminder and its related data |
+| `/pause <id>` | temporarily pause a reminder |
+| `/resume <id>` | resume a paused reminder |
+| `/refresh <id>` | fetch the current price right now (price reminders only) |
+| `/run <id>` | force-evaluate any reminder right now and send the result immediately (e.g. generate an RSS digest on demand) |
+| `/tz` | show the current timezone |
+| `/tz <zone>` | set the timezone in IANA format, e.g. `Europe/Moscow` |
+| `/tv <program>` | find a program on any channel over the next week |
+| `/tv <program> \| <channel>` | find a program on a specific channel over the next week |
+| `/rss <url>` | subscribe to a periodic RSS/Atom news digest, delivered daily at 09:00 (top 5) |
+| `/rss <url> \| HH:MM` | same, with a custom delivery time |
+| `/rss <url> \| HH:MM \| N` | same, with a custom delivery time and item count (1–20) |
 
-ID для команд `/cancel`, `/remove`, `/pause` и `/resume` можно получить командой
-`/list`. Команда `/cancel` сохраняет напоминание в базе со статусом `done`, а
-`/remove` физически удаляет его вместе с уведомлениями и историей наблюдений.
+IDs for `/cancel`, `/remove`, `/pause`, and `/resume` can be obtained with
+`/list`. `/cancel` marks the reminder `done` in the database, while `/remove`
+physically deletes it along with its notifications and observation history.
 
-Для создания напоминания отдельная команда не нужна: отправьте боту описание
-обычным текстом. Бот распознает параметры, при необходимости задаст уточняющий
-вопрос и предложит подтвердить создание кнопкой.
+Creating a reminder does not require a dedicated command: just send the bot a
+plain-text description. The bot recognizes the parameters, asks a
+clarifying question if needed, and offers a confirmation button before
+creating it.
 
-Примеры сообщений:
+Example messages (the bot's NLU understands Russian):
 
 ```text
 напомни завтра в 9:00 позвонить маме
@@ -47,35 +54,41 @@ ID для команд `/cancel`, `/remove`, `/pause` и `/resume` можно п
 уведоми за 3 часа до КВН на Первом
 уведоми при снижении цены: https://example.com/product
 каждый день в 9:00 покажи 5 дешёвых билетов из Москвы в Казань на месяц вперёд
+каждый день в 18:00 создай дайджест новостей на основе https://lenta.ru/rss
 ```
 
-Расписание можно запросить независимо от напоминаний:
+The last example creates a periodic RSS news digest — see
+[RSS news digest](#rss-news-digest) below for details; the same reminder can
+also be created directly with `/rss https://lenta.ru/rss | 18:00`.
+
+TV schedules can also be queried independently of reminders:
 
 ```text
 /tv КВН
 /tv КВН | Первый канал
 ```
 
-Первый вариант ищет выпуски на всех каналах, второй ограничивает результат наиболее
-подходящим по названию каналом. Время показывается в часовом поясе пользователя из `/tz`.
+The first form searches all channels; the second narrows the result to the
+channel whose name best matches. Times are shown in the user's timezone,
+configured via `/tz`.
 
-## Быстрый запуск в Docker
+## Quick start with Docker
 
-Требуются Docker и Docker Compose.
+Docker and Docker Compose are required.
 
 ```bash
 cp config.yaml.example config.yaml
 cp .env.example .env
 ```
 
-Укажите в `.env` как минимум:
+Set at least the following in `.env`:
 
 ```dotenv
 TELEGRAM_TOKEN=your-telegram-token
 LLM_API_KEY=your-openrouter-api-key
 ```
 
-Запустите приложение:
+Start the application:
 
 ```bash
 docker compose up --build -d
@@ -83,14 +96,14 @@ docker compose ps
 docker compose logs -f bot worker api
 ```
 
-Compose автоматически:
+Compose automatically:
 
-- создаёт volume `reminddata`;
-- хранит SQLite в `/data/remind.db`;
-- применяет миграции перед запуском сервисов;
-- публикует API на `http://localhost:8080`.
+- creates the `reminddata` volume;
+- stores SQLite in `/data/remind.db`;
+- applies migrations before starting the services;
+- publishes the API on `http://localhost:8080`.
 
-Проверка API:
+API checks:
 
 ```bash
 curl http://localhost:8080/healthz
@@ -98,46 +111,48 @@ curl http://localhost:8080/readyz
 curl -H "Authorization: Bearer $ADMIN_API_TOKEN" http://localhost:8080/api/notifications?status=failed
 ```
 
-Остановка приложения:
+Stop the application:
 
 ```bash
 docker compose down
 ```
 
-Для удаления SQLite вместе с volume:
+To remove SQLite along with the volume:
 
 ```bash
 docker compose down -v
 ```
 
-## Конфигурация
+## Configuration
 
-Полный пример находится в `config.yaml.example`. Приложения читают
-`config.yaml` из текущего каталога или файл, указанный в `CONFIG_FILE`.
+The full example is in `config.yaml.example`. The applications read
+`config.yaml` from the current directory, or the file specified in
+`CONFIG_FILE`.
 
-Основные разделы YAML:
+Main YAML sections:
 
-- `database` — драйвер и DSN базы данных;
-- `telegram` — токен Telegram;
-- `nlu` — LLM-провайдер, ключ и модель;
-- `providers` — настройки внешних источников;
-- `scheduler` — интервалы фоновых задач;
-- `server` — порт API, worker ID и уровень логирования.
+- `database` — database driver and DSN;
+- `telegram` — Telegram token;
+- `nlu` — LLM provider, key, and model;
+- `providers` — external source settings;
+- `scheduler` — background task intervals;
+- `server` — API port, worker ID, and log level.
 
-TV-провайдер интегрирован с [EPG Service API](https://epgservice.ru/en/docs/).
-Он разрешает название канала через `/v1/index`, загружает недельное расписание
-из `/v1/schedule/{channel_id}` и ищет передачу в заданном временном окне.
+The TV provider integrates with the
+[EPG Service API](https://epgservice.ru/en/docs/). It resolves the channel
+name via `/v1/index`, loads the weekly schedule from
+`/v1/schedule/{channel_id}`, and looks up the program within the requested
+time window.
 
-При отображении расписания на день бот не показывает программы, время окончания
-которых уже прошло (относительно часового пояса пользователя из `/tz`).
+When displaying a day's schedule, the bot hides programs that have already
+ended (relative to the user's timezone from `/tz`).
 
-Docker-образ собирается на базе `debian:bookworm-slim` и содержит Chromium для
-режима `price.headless: true`. При `headless: false` (по умолчанию) Chromium не
-запускается.
+The Docker image is built on `debian:bookworm-slim` and includes Chromium for
+`price.headless: true` mode. With `headless: false` (the default), Chromium
+does not start.
 
-Docker-образ содержит резервный `/app/config.yaml` с безопасными значениями по
-умолчанию. Docker Compose монтирует локальный `config.yaml` поверх него в режиме
-read-only:
+The Docker image ships a fallback `/app/config.yaml` with safe defaults.
+Docker Compose mounts the local `config.yaml` over it in read-only mode:
 
 ```yaml
 volumes:
@@ -145,36 +160,38 @@ volumes:
   - ./config.yaml:/app/config.yaml:ro
 ```
 
-Поэтому перед первым запуском Compose создайте `config.yaml` из примера. Секреты
-можно хранить в нём или передавать через `.env`; непустые переменные окружения
-имеют приоритет над YAML.
+So create `config.yaml` from the example before the first Compose run.
+Secrets can be stored there or passed via `.env`; non-empty environment
+variables take priority over YAML.
 
-Секреты и deployment-настройки можно переопределять переменными окружения:
+Secrets and deployment settings can be overridden with environment
+variables:
 
-| Переменная | Назначение |
+| Variable | Purpose |
 | --- | --- |
-| `TELEGRAM_TOKEN` | токен Telegram-бота |
-| `LLM_API_KEY` | ключ OpenRouter или Anthropic |
-| `EPG_SERVICE_API_KEY` | Bearer-токен EPG Service |
-| `EPG_SERVICE_BASE_URL` | переопределение корневого URL EPG Service API |
-| `ADMIN_API_TOKEN` | Bearer-токен для `/api/*` и `/metrics`; без него admin API отключён |
-| `API_BIND` | адрес публикации API в Docker Compose, по умолчанию `127.0.0.1` |
-| `API_PORT` | внешний порт API в Docker Compose, по умолчанию `8080` |
-| `IPTVX_EPG_URL` | URL XMLTV/XMLTV.GZ для основного TV-провайдера |
-| `IPTVX_EPG_FILE` | путь к локальному кешу IPTVX EPG |
-| `DATABASE_DRIVER` | `sqlite` или `postgres` |
-| `DATABASE_DSN` | путь SQLite или PostgreSQL DSN |
-| `DATABASE_URL` | PostgreSQL URL с наивысшим приоритетом |
-| `LOG_LEVEL` | `debug`, `info`, `warn` или `error` |
+| `TELEGRAM_TOKEN` | Telegram bot token |
+| `LLM_API_KEY` | OpenRouter or Anthropic key |
+| `EPG_SERVICE_API_KEY` | EPG Service Bearer token |
+| `EPG_SERVICE_BASE_URL` | override for the EPG Service API base URL |
+| `ADMIN_API_TOKEN` | Bearer token for `/api/*` and `/metrics`; the admin API is disabled without it |
+| `API_BIND` | address the API is published on in Docker Compose, default `127.0.0.1` |
+| `API_PORT` | external API port in Docker Compose, default `8080` |
+| `IPTVX_EPG_URL` | XMLTV/XMLTV.GZ URL for the primary TV provider |
+| `IPTVX_EPG_FILE` | path to the local IPTVX EPG cache |
+| `DATABASE_DRIVER` | `sqlite` or `postgres` |
+| `DATABASE_DSN` | SQLite path or PostgreSQL DSN |
+| `DATABASE_URL` | PostgreSQL URL, highest priority |
+| `LOG_LEVEL` | `debug`, `info`, `warn`, or `error` |
 
-## TV-расписание
+## TV schedule
 
-По умолчанию worker скачивает XMLTV-расписание IPTVX, сохраняет исходный файл в локальный
-кеш и импортирует каналы и программы в общую базу данных. Эта база используется как для
-TV-напоминаний, так и командой `/tv` в процессе bot. Поэтому bot и worker должны работать
-с одной SQLite-базой или с одним экземпляром PostgreSQL.
+By default the worker downloads the IPTVX XMLTV schedule, caches the raw
+file locally, and imports channels and programs into the shared database.
+This database is used both for TV reminders and for the `/tv` command in the
+bot process. Therefore bot and worker must share the same SQLite database or
+the same PostgreSQL instance.
 
-Настройки основного провайдера:
+Primary provider settings:
 
 ```yaml
 providers:
@@ -185,26 +202,28 @@ providers:
     timeout: 120s
 ```
 
-При запуске в Docker используйте путь `/data/iptvx_epg.xml.gz`: каталог `/data` подключён
-к persistent volume. Первый импорт может занять некоторое время; до его завершения `/tv`
-вернёт пустой результат.
+When running in Docker, use the `/data/iptvx_epg.xml.gz` path: the `/data`
+directory is mounted on the persistent volume. The first import can take a
+while; until it finishes, `/tv` returns an empty result.
 
-Поля секции `providers.iptvx`:
+Fields of the `providers.iptvx` section:
 
-| Поле | Описание | Значение по умолчанию |
+| Field | Description | Default |
 | --- | --- | --- |
-| `url` | адрес XMLTV или XMLTV.GZ; пустое значение включает резервный EPG Service | `https://iptvx.one/epg/epg.xml.gz` |
-| `file_path` | путь к кешу скачанного расписания | `./data/iptvx_epg.xml.gz` |
-| `update_interval` | период проверки и обновления EPG | `168h` |
-| `timeout` | таймаут скачивания EPG-файла | `120s` |
+| `url` | XMLTV or XMLTV.GZ address; an empty value enables the EPG Service fallback | `https://iptvx.one/epg/epg.xml.gz` |
+| `file_path` | path to the downloaded schedule cache | `./data/iptvx_epg.xml.gz` |
+| `update_interval` | EPG check-and-refresh period | `168h` |
+| `timeout` | EPG file download timeout | `120s` |
 
-`IPTVX_EPG_URL` и `IPTVX_EPG_FILE` переопределяют соответствующие значения YAML.
-В текущем `docker-compose.yml` эти переменные не пробрасываются автоматически, поэтому
-для Compose удобнее задавать параметры IPTVX непосредственно в `config.yaml`.
+`IPTVX_EPG_URL` and `IPTVX_EPG_FILE` override the corresponding YAML values.
+The current `docker-compose.yml` does not pass these variables through
+automatically, so for Compose it's more convenient to set IPTVX parameters
+directly in `config.yaml`.
 
-Если `providers.iptvx.url` пуст, worker переключается на EPG Service. Этот режим требует
-Bearer-токен и поддерживает TV-напоминания, но не импортирует расписание в локальную базу,
-поэтому команда `/tv` не получает из него данные:
+If `providers.iptvx.url` is empty, the worker switches to the EPG Service.
+This mode requires a Bearer token and supports TV reminders, but does not
+import the schedule into the local database, so the `/tv` command gets no
+data from it:
 
 ```yaml
 providers:
@@ -216,11 +235,12 @@ providers:
     timeout: 15s
 ```
 
-`EPG_SERVICE_API_KEY` переопределяет ключ из YAML, а `EPG_SERVICE_BASE_URL` —
-`providers.tv.base_url`. EPG Service кеширует индекс каналов на один час и запрашивает
-расписание отдельно для каждой недели во временном окне напоминания.
+`EPG_SERVICE_API_KEY` overrides the key from YAML, and
+`EPG_SERVICE_BASE_URL` overrides `providers.tv.base_url`. The EPG Service
+caches the channel index for one hour and requests the schedule separately
+for each week within the reminder's time window.
 
-Для TV-напоминания NLU формирует параметры `channel` и название передачи:
+For a TV reminder, the NLU produces `channel` and program-title parameters:
 
 ```json
 {
@@ -230,15 +250,15 @@ providers:
 }
 ```
 
-Если ID канала уже известен, вместо поиска по названию можно передать
-`params.channel_id`. Поле `params.channel` используется для поиска канала по
-названию. Для TV-напоминания необходимо указать хотя бы одно из этих полей;
-команда `/tv` также умеет искать программу сразу по всем каналам.
+If the channel ID is already known, `params.channel_id` can be passed
+instead of searching by name. `params.channel` is used to look up the
+channel by name. A TV reminder needs at least one of these fields; the `/tv`
+command can also search a program across all channels at once.
 
-## Мониторинг цены
+## Price monitoring
 
-Бот отслеживает снижение цены товара на странице интернет-магазина. Для создания
-напоминания достаточно отправить ссылку и ключевое слово:
+The bot tracks a price drop for a product on an online store's page. To
+create a reminder, just send a link and a keyword:
 
 ```text
 уведоми при снижении цены https://example.com/product
@@ -247,28 +267,29 @@ providers:
 уведоми при снижении цены https://example.com/product каждые 30 минут
 ```
 
-NLU автоматически извлекает URL и формирует условное напоминание. Worker периодически
-проверяет страницу и отправляет уведомление, когда цена снижается.
+The NLU automatically extracts the URL and builds a conditional reminder.
+The worker periodically checks the page and sends a notification when the
+price drops.
 
-### Периодичность опроса
+### Poll interval
 
-Интервал проверки можно указать прямо в тексте напоминания:
+The check interval can be specified directly in the reminder text:
 
-| Фраза | Расписание |
+| Phrase | Schedule |
 | --- | --- |
-| `каждый час` / `раз в час` | каждый час |
-| `каждые 2 часа` | каждые 2 часа |
-| `каждые 30 минут` | каждые 30 минут |
-| _(не указано)_ | значение `providers.price.poll_cron` из конфига |
+| `каждый час` / `раз в час` | every hour |
+| `каждые 2 часа` | every 2 hours |
+| `каждые 30 минут` | every 30 minutes |
+| _(not specified)_ | `providers.price.poll_cron` from the config |
 
-Если интервал не задан пользователем, применяется значение `poll_cron` из конфига
-(по умолчанию `"0 * * * *"` — раз в час). Диалог подтверждения всегда показывает
-итоговую периодичность перед созданием напоминания.
+If the user does not specify an interval, `poll_cron` from the config is
+used (`"0 * * * *"` — hourly — by default). The confirmation dialog always
+shows the resulting interval before creating the reminder.
 
-### Уведомление об ошибке получения цены
+### Price fetch error notification
 
-Если при очередном опросе страницы бот получает HTTP-ошибку, пользователь получает
-уведомление с кодом ответа:
+If the bot gets an HTTP error while polling the page, the user receives a
+notification with the response code:
 
 ```
 ⚠️ Не удалось получить текущую цену
@@ -279,10 +300,10 @@ HTTP статус: 403
 Бот продолжит проверять и уведомит при снижении цены.
 ```
 
-Такое уведомление отправляется не чаще одного раза в сутки на каждое напоминание.
-При сетевой ошибке (нет ответа от сервера) статус не указывается.
+This notification is sent at most once a day per reminder. On a network
+error (no response from the server) the status is omitted.
 
-### Настройки провайдера
+### Provider settings
 
 ```yaml
 providers:
@@ -294,22 +315,108 @@ providers:
     poll_cron: "0 9 * * *"
 ```
 
-| Поле | Описание | Значение по умолчанию |
+| Field | Description | Default |
 | --- | --- | --- |
-| `user_agent` | User-Agent для HTTP-запросов к страницам магазинов | Chrome/Windows строка |
-| `timeout` | таймаут получения страницы (HTTP или headless) | `15s` |
-| `headless` | использовать Chromium для обхода WAF/TLS-фингерпринтинга | `false` |
-| `proxy_url` | прокси для headless-браузера (HTTP, HTTPS или SOCKS5) | `""` |
-| `poll_cron` | расписание опроса по умолчанию (5-польный cron, UTC) | `"0 9 * * *"` |
+| `user_agent` | User-Agent for HTTP requests to store pages | Chrome/Windows string |
+| `timeout` | timeout for fetching the page (HTTP or headless) | `15s` |
+| `headless` | use Chromium to bypass WAF/TLS fingerprinting | `false` |
+| `proxy_url` | proxy for the headless browser (HTTP, HTTPS, or SOCKS5) | `""` |
+| `poll_cron` | default poll schedule (5-field cron, UTC) | `"0 9 * * *"` |
 
-Часть магазинов (например, DNS-shop) блокирует обычные HTTP-запросы по TLS-фингерпринту.
-Включите `headless: true`, чтобы использовать реальный браузерный стек. Docker-образ
-содержит Chromium; первый запрос в этом режиме занимает 1–2 секунды на запуск браузера,
-последующие — значительно быстрее благодаря общему процессу Chrome.
+Some stores (e.g. DNS-shop) block plain HTTP requests by TLS fingerprint.
+Enable `headless: true` to use a real browser stack. The Docker image
+includes Chromium; the first request in this mode takes 1–2 seconds to
+launch the browser, subsequent ones are much faster thanks to the shared
+Chrome process.
 
-## LLM-провайдер
+## RSS news digest
 
-OpenRouter используется по умолчанию:
+The bot can turn any RSS 2.0 or Atom feed into a periodic "important news"
+digest, delivered once a day at a chosen time. The simplest way is the
+dedicated command:
+
+```text
+/rss https://lenta.ru/rss                       → daily digest at 09:00, top 5
+/rss https://lenta.ru/rss | 08:30                → custom delivery time
+/rss https://lenta.ru/rss | 08:30 | 10           → custom time and top-10 items
+```
+
+The same reminder can also be created from a plain-text message, without
+using the command — the NLU recognizes phrases that combine a feed link with
+a digest request and a time:
+
+```text
+каждый день в 18:00 создай дайджест новостей на основе https://lenta.ru/rss
+дайджест новостей топ 10 по ленте https://lenta.ru/rss в 8 утра
+```
+
+If no time is given, the digest defaults to 09:00; if no item count is
+given, it defaults to top 5. `/list`, `/pause`, `/resume`, `/cancel`, and
+`/remove` manage an RSS digest reminder the same way as any other
+conditional reminder.
+
+To generate a digest immediately instead of waiting for its scheduled time,
+use `/run <id>` with the ID from `/list`:
+
+```text
+/run 3fa85f64-5717-4562-b3fc-2c963f66afa6
+```
+
+`/run` re-fetches the feed and sends the digest right away. Unlike the
+scheduled delivery, it is never skipped because "today's digest already went
+out" — it always sends a fresh result (or an explanatory message if the feed
+has no items). This works the same way for other reminder types too: `/run`
+re-checks a price-drop or TV-anchor reminder on demand.
+
+### Importance ranking
+
+By default, importance is a fixed heuristic: a curated keyword match (e.g.
+"срочно", "экстренно", "погибли", "взрыв", "кризис", "breaking", "urgent")
+adds to the score, and recency adds up to a few more points, decaying
+linearly to zero over a 7-day window. Items are deduplicated by link and
+sorted by score, descending.
+
+Optionally, the LLM configured under `nlu:` can take over ranking and
+summarization instead: enable `providers.rss.llm_digest: true` and, on each
+digest tick, the heuristic's top candidates (up to 3× the digest's item
+count) are handed to the LLM, which picks the genuinely most important ones
+and writes a fresh 2–3 sentence summary for each. This is off by default
+because it adds one LLM call per digest tick; if that call fails or is
+unavailable, the digest silently falls back to the heuristic ranking instead
+of failing outright.
+
+```yaml
+providers:
+  rss:
+    llm_digest: true
+```
+
+### SSRF protection
+
+A feed URL is user-supplied input the server makes an outbound request to —
+the same risk class as the price-monitoring URL. `internal/netsafe`
+provides a hardened HTTP client shared by the RSS provider: it rejects
+unsupported URL schemes, `localhost`, private/loopback/link-local
+addresses, and re-validates the resolved IP at connect time to close the
+DNS-rebinding window.
+
+### Provider settings
+
+```yaml
+providers:
+  rss:
+    timeout: 15s
+    llm_digest: false
+```
+
+| Field | Description | Default |
+| --- | --- | --- |
+| `timeout` | timeout for fetching and parsing one RSS/Atom feed | `15s` |
+| `llm_digest` | use the `nlu:` LLM to rank and summarize digest items instead of the heuristic | `false` |
+
+## LLM provider
+
+OpenRouter is used by default:
 
 ```yaml
 nlu:
@@ -325,10 +432,11 @@ nlu:
     max_tokens: 1024
 ```
 
-При ответе HTTP 429 от основной модели OpenRouter последовательно пробуются модели из
-`fallback_models`. `timeout` ограничивает всё обращение к LLM, а `max_tokens` — размер ответа.
+On an HTTP 429 from the primary model, OpenRouter tries the models in
+`fallback_models` in order. `timeout` bounds the whole LLM call, and
+`max_tokens` bounds the response size.
 
-Для прямого подключения к Anthropic:
+For a direct connection to Anthropic:
 
 ```yaml
 nlu:
@@ -340,19 +448,19 @@ nlu:
 
 ## PostgreSQL
 
-PostgreSQL не входит в Compose и не запускается по умолчанию. Для подключения к
-существующему серверу задайте URL:
+PostgreSQL is not part of Compose and does not start by default. To connect
+to an existing server, set the URL:
 
 ```dotenv
 DATABASE_URL=postgres://user:password@host:5432/remind?sslmode=disable
 ```
 
-`DATABASE_URL` автоматически выбирает драйвер `postgres`. Мигратор применит
-PostgreSQL-версию схемы при следующем запуске.
+`DATABASE_URL` automatically selects the `postgres` driver. The migrator
+applies the PostgreSQL schema version on the next run.
 
-## Локальная разработка
+## Local development
 
-Требуется Go 1.26 или новее.
+Go 1.26 or newer is required.
 
 ```bash
 cp config.yaml.example config.yaml
@@ -360,7 +468,7 @@ go mod download
 go run ./cmd/remindctl migrate up
 ```
 
-Сервисы запускаются отдельными процессами:
+Services run as separate processes:
 
 ```bash
 go run ./cmd/bot
@@ -368,7 +476,7 @@ go run ./cmd/worker
 go run ./cmd/api
 ```
 
-Тесты, форматирование и статический анализ:
+Tests, formatting, and static analysis:
 
 ```bash
 go test ./... -race -count=1
@@ -391,12 +499,12 @@ remindctl version
 
 - `GET /healthz` — liveness check.
 - `GET /readyz` — readiness check.
-- `GET /metrics` — метрики Prometheus, требует `Authorization: Bearer <ADMIN_API_TOKEN>`.
-- `GET /api/users/{id}/reminders` — напоминания пользователя.
-- `GET /api/reminders/{id}` — напоминание по ID.
-- `GET /api/reminders/{id}/observations` — история наблюдений.
-- `POST /api/reminders/{id}/cancel` — отмена напоминания.
-- `GET /api/notifications` — уведомления.
-- `POST /api/notifications/{id}/retry` — повторная отправка.
+- `GET /metrics` — Prometheus metrics, requires `Authorization: Bearer <ADMIN_API_TOKEN>`.
+- `GET /api/users/{id}/reminders` — a user's reminders.
+- `GET /api/reminders/{id}` — a reminder by ID.
+- `GET /api/reminders/{id}/observations` — observation history.
+- `POST /api/reminders/{id}/cancel` — cancel a reminder.
+- `GET /api/notifications` — notifications.
+- `POST /api/notifications/{id}/retry` — resend a notification.
 
-Все `/api/*` endpoints требуют `Authorization: Bearer <ADMIN_API_TOKEN>`.
+All `/api/*` endpoints require `Authorization: Bearer <ADMIN_API_TOKEN>`.

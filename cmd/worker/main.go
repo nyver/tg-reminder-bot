@@ -12,11 +12,13 @@ import (
 	"github.com/nyver2k/remindertgbot/internal/clock"
 	"github.com/nyver2k/remindertgbot/internal/config"
 	"github.com/nyver2k/remindertgbot/internal/delivery"
+	"github.com/nyver2k/remindertgbot/internal/nlu"
 	"github.com/nyver2k/remindertgbot/internal/observability"
 	"github.com/nyver2k/remindertgbot/internal/provider"
-	"github.com/nyver2k/remindertgbot/internal/provider/price"
-	"github.com/nyver2k/remindertgbot/internal/provider/travel"
 	"github.com/nyver2k/remindertgbot/internal/provider/iptvx"
+	"github.com/nyver2k/remindertgbot/internal/provider/price"
+	"github.com/nyver2k/remindertgbot/internal/provider/rss"
+	"github.com/nyver2k/remindertgbot/internal/provider/travel"
 	"github.com/nyver2k/remindertgbot/internal/provider/tvschedule"
 	"github.com/nyver2k/remindertgbot/internal/scheduler"
 	"github.com/nyver2k/remindertgbot/internal/storage/postgres"
@@ -77,8 +79,22 @@ func main() {
 	agg := travel.NewAggregator(log, airP, railP)
 	registry.RegisterSearch(agg)
 
+	registry.RegisterNews(rss.New(cfg.Providers.RSS.Timeout, log))
+
 	// Evaluator.
 	evaluator := scheduler.NewEvaluator(registry, obsRepo, clock.Real(), cfg.Providers.Travel.MaxHorizonDays, log)
+	if cfg.Providers.RSS.LLMDigest {
+		model := cfg.NLU.OpenRouter.Model
+		if cfg.NLU.Provider == "claude" {
+			model = cfg.NLU.Claude.Model
+		}
+		ranker, err := nlu.NewConfiguredNewsRanker(cfg.NLU.Provider, cfg.NLU.APIKey, model, cfg.NLU.OpenRouter.BaseURL, cfg.NLU.OpenRouter.FallbackModels, cfg.NLU.OpenRouter.Timeout, cfg.NLU.OpenRouter.MaxTokens)
+		if err != nil {
+			log.Error("rss llm_digest init", "err", err)
+			os.Exit(1)
+		}
+		evaluator.SetNewsRanker(ranker)
+	}
 
 	workerID := workerID(cfg)
 

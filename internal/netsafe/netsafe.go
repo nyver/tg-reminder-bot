@@ -1,0 +1,135 @@
+// Package netsafe provides an SSRF-hardened HTTP client for providers that
+// fetch arbitrary user-supplied URLs (e.g. an RSS feed link).
+package netsafe
+
+import (
+	"context"
+	"fmt"
+	"net"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
+)
+
+// lookupIPAddr is overridden in tests to avoid depending on real DNS/network.
+var lookupIPAddr = net.DefaultResolver.LookupIPAddr
+
+// SafeClient returns an *http.Client whose DialContext resolves the host and
+// rejects private/loopback/link-local addresses at connect time, closing the
+// DNS-rebinding window that exists when validation and dialing are separate
+// steps.
+func SafeClient(timeout time.Duration) *http.Client {
+	dial := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, err
+		}
+		if isPrivateHost(host) {
+			return nil, fmt.Errorf("connection to private host %q blocked", host)
+		}
+		lookupCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		addrs, err := lookupIPAddr(lookupCtx, host)
+		cancel()
+		if err != nil {
+			return nil, err
+		}
+		if len(addrs) == 0 {
+			return nil, fmt.Errorf("no addresses resolved for %s", host)
+		}
+		for _, a := range addrs {
+			if isPrivateIP(a.IP) {
+				return nil, fmt.Errorf("connection to private IP %s (->%s) blocked", host, a.IP)
+			}
+		}
+		// Connect directly to the first resolved IP so the OS cannot silently
+		// re-resolve the hostname to a different (private) address mid-flight.
+		d := net.Dialer{}
+		return d.DialContext(ctx, network, net.JoinHostPort(addrs[0].IP.String(), port))
+	}
+	return &http.Client{
+		Timeout: timeout,
+		Transport: &http.Transport{
+			DialContext:     dial,
+			IdleConnTimeout: 30 * time.Second,
+		},
+	}
+}
+
+// ValidateURL rejects unsupported schemes and obviously-private hosts before
+// any request is made. SafeClient's DialContext is the authoritative guard
+// against DNS rebinding; this is a cheap early check that fails fast with a
+// clearer error.
+func ValidateURL(ctx context.Context, raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return err
+	}
+	if u.Scheme != "https" && u.Scheme != "http" {
+		return fmt.Errorf("unsupported scheme: %s", u.Scheme)
+	}
+	host := u.Hostname()
+	if host == "" {
+		return fmt.Errorf("host is required")
+	}
+	if isPrivateHost(host) {
+		return fmt.Errorf("private host not allowed: %s", host)
+	}
+	lookupCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	addrs, err := lookupIPAddr(lookupCtx, host)
+	if err != nil {
+		return fmt.Errorf("resolve host %s: %w", host, err)
+	}
+	if len(addrs) == 0 {
+		return fmt.Errorf("resolve host %s: no addresses", host)
+	}
+	for _, addr := range addrs {
+		if isPrivateIP(addr.IP) {
+			return fmt.Errorf("private resolved address not allowed: %s -> %s", host, addr.IP)
+		}
+	}
+	return nil
+}
+
+func isPrivateHost(host string) bool {
+	h := strings.ToLower(strings.TrimSpace(host))
+	if h == "localhost" || h == "0.0.0.0" {
+		return true
+	}
+	ip := net.ParseIP(h)
+	if ip == nil {
+		return false
+	}
+	return isPrivateIP(ip)
+}
+
+// privateNets contains RFC-1918 + link-local + loopback ranges.
+var privateNets []*net.IPNet
+
+func init() {
+	for _, cidr := range []string{
+		"127.0.0.0/8",    // loopback
+		"10.0.0.0/8",     // RFC-1918 class A
+		"172.16.0.0/12",  // RFC-1918 class B (172.16-31)
+		"192.168.0.0/16", // RFC-1918 class C
+		"169.254.0.0/16", // link-local / cloud metadata (169.254.169.254)
+		"::1/128",        // IPv6 loopback
+		"fc00::/7",       // IPv6 ULA
+		"fe80::/10",      // IPv6 link-local
+	} {
+		_, network, _ := net.ParseCIDR(cidr)
+		if network != nil {
+			privateNets = append(privateNets, network)
+		}
+	}
+}
+
+func isPrivateIP(ip net.IP) bool {
+	for _, n := range privateNets {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}

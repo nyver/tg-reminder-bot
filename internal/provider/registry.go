@@ -7,6 +7,7 @@ type Registry struct {
 	events  map[string]EventProvider
 	metrics map[string]MetricProvider
 	search  map[string]SearchProvider
+	news    map[string]NewsProvider
 }
 
 func NewRegistry() *Registry {
@@ -14,6 +15,7 @@ func NewRegistry() *Registry {
 		events:  make(map[string]EventProvider),
 		metrics: make(map[string]MetricProvider),
 		search:  make(map[string]SearchProvider),
+		news:    make(map[string]NewsProvider),
 	}
 }
 
@@ -29,6 +31,10 @@ func (r *Registry) RegisterSearch(p SearchProvider) {
 	r.search[p.Type()] = p
 }
 
+func (r *Registry) RegisterNews(p NewsProvider) {
+	r.news[p.Type()] = p
+}
+
 func (r *Registry) Event(typ string) (EventProvider, bool) {
 	p, ok := r.events[typ]
 	return p, ok
@@ -41,6 +47,11 @@ func (r *Registry) Metric(typ string) (MetricProvider, bool) {
 
 func (r *Registry) Search(typ string) (SearchProvider, bool) {
 	p, ok := r.search[typ]
+	return p, ok
+}
+
+func (r *Registry) News(typ string) (NewsProvider, bool) {
+	p, ok := r.news[typ]
 	return p, ok
 }
 

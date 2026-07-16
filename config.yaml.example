@@ -1,111 +1,120 @@
-# Все длительности задаются в формате Go time.Duration: 15s, 1m, 24h.
-# Значения ${VAR} подставляются из окружения до разбора YAML.
+# All durations use Go's time.Duration format: 15s, 1m, 24h.
+# ${VAR} values are substituted from the environment before YAML is parsed.
 
 database:
-  # Поддерживаемые драйверы: sqlite и postgres.
+  # Supported drivers: sqlite and postgres.
   driver: sqlite
-  # Для SQLite укажите путь к файлу. Каталог должен быть доступен на запись.
+  # For SQLite, specify the file path. The directory must be writable.
   dsn: ./data/remind.db
-  # Пример PostgreSQL DSN:
+  # Example PostgreSQL DSN:
   # dsn: postgres://remind:remind@localhost:5432/remind?sslmode=disable
-  # DATABASE_URL имеет приоритет над driver и dsn и автоматически выбирает postgres.
+  # DATABASE_URL takes priority over driver and dsn and automatically selects postgres.
 
 telegram:
-  # Токен от BotFather. Непустой TELEGRAM_TOKEN переопределяет это поле.
+  # Token from BotFather. A non-empty TELEGRAM_TOKEN overrides this field.
   token: "${TELEGRAM_TOKEN}"
 
 nlu:
-  # LLM для разбора естественного языка: openrouter или claude.
+  # LLM used for natural-language parsing: openrouter or claude.
   provider: openrouter
-  # Общий ключ выбранного провайдера. Можно передать через LLM_API_KEY.
+  # Shared key for the selected provider. Can also be passed via LLM_API_KEY.
   api_key: "${LLM_API_KEY}"
   claude:
-    # Используется только при provider: claude.
+    # Used only when provider: claude.
     model: claude-haiku-4-5-20251001
   openrouter:
-    # OpenAI-совместимый endpoint без /chat/completions.
+    # OpenAI-compatible endpoint without /chat/completions.
     base_url: https://openrouter.ai/api/v1
-    # Основная модель вызывается первой. Полный каталог: https://openrouter.ai/models
+    # Primary model, called first. Full catalog: https://openrouter.ai/models
     model: anthropic/claude-haiku-4-5
-    # При rate limit (HTTP 429) бот последовательно попробует эти модели.
+    # On rate limit (HTTP 429), the bot tries these models in order.
     fallback_models:
       - google/gemma-3-27b-it:free
       - meta-llama/llama-3.3-70b-instruct:free
-    # Общий таймаут одного обращения к LLM.
+    # Overall timeout for a single LLM call.
     timeout: 60s
-    # Максимальный размер ответа модели в токенах.
+    # Maximum model response size in tokens.
     max_tokens: 1024
 
 providers:
-  # Резервный EPG Service используется worker, только если iptvx.url пуст.
-  # Он поддерживает TV-напоминания, но не наполняет базу для команды /tv.
+  # Fallback EPG Service used by the worker only when iptvx.url is empty.
+  # It supports TV reminders but does not populate the database for /tv.
   tv:
-    # Документация API v1: https://epgservice.ru/en/docs/
+    # API v1 docs: https://epgservice.ru/en/docs/
     base_url: https://api.epgservice.ru
-    # Bearer-токен; EPG_SERVICE_API_KEY имеет приоритет над YAML.
+    # Bearer token; EPG_SERVICE_API_KEY takes priority over YAML.
     api_key: "${EPG_SERVICE_API_KEY}"
-    # Таймаут одного запроса к индексу или расписанию.
+    # Timeout for a single index or schedule request.
     timeout: 15s
 
-  # Основной источник телепрограммы. Worker скачивает XMLTV, импортирует его
-  # в общую БД и обновляет; bot читает эту БД для команды /tv.
+  # Primary TV schedule source. The worker downloads XMLTV, imports it into
+  # the shared DB, and refreshes it; the bot reads this DB for /tv.
   iptvx:
-    # URL XMLTV/XMLTV.GZ. Пустое значение переключает worker на providers.tv.
-    # Полный архив (~100 MB): https://iptvx.one/epg/epg.xml.gz
-    # Облегчённый (~15 MB):   https://iptvx.one/epg/epg_lite.xml.gz
+    # XMLTV/XMLTV.GZ URL. An empty value switches the worker to providers.tv.
+    # Full archive (~100 MB): https://iptvx.one/epg/epg.xml.gz
+    # Lightweight (~15 MB):   https://iptvx.one/epg/epg_lite.xml.gz
     url: https://iptvx.one/epg/epg.xml.gz
-    # Локальный кеш (абсолютный путь внутри тома /data).
-    # Для запуска вне Docker замените на ./data/iptvx_epg.xml.gz.
+    # Local cache path (absolute path inside the /data volume).
+    # For running outside Docker, use ./data/iptvx_epg.xml.gz instead.
     file_path: /data/iptvx_epg.xml.gz
-    # Период проверки свежести и обновления расписания (файл выходит раз в неделю).
+    # Freshness-check and refresh period (the file is published weekly).
     update_interval: 168h
-    # Таймаут скачивания большого EPG-файла.
+    # Timeout for downloading the large EPG file.
     timeout: 120s
 
   price:
-    # User-Agent для запросов к страницам магазинов.
+    # User-Agent for requests to store pages.
     user_agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36
-    # Таймаут получения страницы товара (HTTP-режим) или загрузки в браузере (headless).
+    # Timeout for fetching the product page (HTTP mode) or loading it in the browser (headless).
     timeout: 15s
-    # Использовать headless Chromium для обхода WAF/TLS-фингерпринтинга.
-    # Требует Chromium в runtime-образе (docker-compose: debian:bookworm-slim + chromium).
-    # false — обычный HTTP-клиент, подходит для большинства магазинов.
-    # true  — реальный браузер, нужен для сайтов с агрессивной защитой (Qrator, Cloudflare).
+    # Use headless Chromium to bypass WAF/TLS fingerprinting.
+    # Requires Chromium in the runtime image (docker-compose: debian:bookworm-slim + chromium).
+    # false — plain HTTP client, works for most stores.
+    # true  — real browser, needed for sites with aggressive protection (Qrator, Cloudflare).
     headless: false
-    # Прокси для headless-браузера. Обязателен для сайтов (напр. DNS-shop), которые
-    # блокируют по IP/TLS-fingerprint. Поддерживаются HTTP, HTTPS и SOCKS5:
+    # Proxy for the headless browser. Required for sites (e.g. DNS-shop) that
+    # block by IP/TLS fingerprint. HTTP, HTTPS, and SOCKS5 are supported:
     #   proxy_url: http://user:pass@proxy.example.com:3128
     #   proxy_url: socks5://user:pass@proxy.example.com:1080
-    # Пустое значение — прямое подключение без прокси.
+    # Empty value — direct connection without a proxy.
     proxy_url: ""
-    # Периодичность опроса страницы товара по умолчанию (5-польный cron, UTC).
-    # Применяется когда пользователь не указал интервал в тексте напоминания.
-    # Примеры:
-    #   0 * * * *     — каждый час            (рекомендуется)
-    #   0 */4 * * *   — каждые 4 часа
-    #   0 */12 * * *  — дважды в сутки
-    #   0 9 * * *     — каждый день в 09:00 UTC
+    # Default poll schedule for a product page (5-field cron, UTC).
+    # Applied when the user did not specify an interval in the reminder text.
+    # Examples:
+    #   0 * * * *     — every hour            (recommended)
+    #   0 */4 * * *   — every 4 hours
+    #   0 */12 * * *  — twice a day
+    #   0 9 * * *     — daily at 09:00 UTC
     poll_cron: "0 9 * * *"
 
   travel:
-    # Пустой ключ отключает соответствующий источник билетов.
+    # An empty key disables the corresponding ticket source.
     air_api_key: ""
     rail_api_key: ""
-    # Таймаут запроса к источнику предложений.
+    # Timeout for a request to the offers source.
     timeout: 10s
-    # Максимальная глубина поиска от текущей даты.
+    # Maximum search depth from the current date.
     max_horizon_days: 180
 
+  rss:
+    # Timeout for fetching and parsing one RSS/Atom feed for the /rss command.
+    timeout: 15s
+    # Use the LLM (same nlu.* provider/model settings) to pick and
+    # re-summarize the most important items in each digest, instead of the
+    # keyword+recency heuristic. Adds one LLM call per digest tick; falls
+    # back to the heuristic automatically if that call fails.
+    llm_digest: false
+
 scheduler:
-  # Интервал поиска напоминаний, которые пора вычислить.
+  # Interval for finding reminders that are due for evaluation.
   watcher_tick: 1m
-  # Интервал доставки подготовленных Telegram-уведомлений.
+  # Interval for delivering prepared Telegram notifications.
   delivery_tick: 15s
-  # Интервал очистки устаревших служебных данных.
+  # Interval for cleaning up stale internal data.
   housekeeping_tick: 1h
 
 server:
-  # Идентификатор worker для lease; пустое значение генерируется автоматически.
+  # Worker ID used for the lease; an empty value is generated automatically.
   worker_id: ""
-  # Допустимые уровни: debug, info, warn, error.
+  # Allowed levels: debug, info, warn, error.
   log_level: info

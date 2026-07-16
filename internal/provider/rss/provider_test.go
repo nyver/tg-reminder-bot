@@ -1,0 +1,173 @@
+package rss
+
+import (
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/nyver2k/remindertgbot/internal/provider"
+)
+
+const sampleRSS = `<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Test Feed</title>
+    <item>
+      <title>Первая новость</title>
+      <link>https://example.com/1</link>
+      <description>&lt;p&gt;Это первое предложение. Это второе предложение! А это третье? А четвёртое предложение уже не войдёт в саммари.&lt;/p&gt;</description>
+      <pubDate>Mon, 13 Jul 2026 09:00:00 +0300</pubDate>
+    </item>
+    <item>
+      <title>Срочно: важная новость</title>
+      <link>https://example.com/2</link>
+      <description>Без пунктуации в конце совсем длинный текст который не содержит явных границ предложений и должен быть обрезан по жёсткому лимиту символов а не потерян полностью</description>
+      <pubDate>Mon, 13 Jul 2026 08:00:00 +0300</pubDate>
+    </item>
+    <item>
+      <title>Дубликат</title>
+      <link>https://example.com/2</link>
+      <description></description>
+      <pubDate></pubDate>
+    </item>
+  </channel>
+</rss>`
+
+const sampleAtom = `<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Test Atom Feed</title>
+  <entry>
+    <title>Atom-новость</title>
+    <link rel="alternate" href="https://example.com/atom/1"/>
+    <summary>Одно предложение в саммари.</summary>
+    <published>2026-07-13T07:30:00Z</published>
+  </entry>
+</feed>`
+
+func TestParseFeedRSS(t *testing.T) {
+	items, err := parseFeed([]byte(sampleRSS))
+	if err != nil {
+		t.Fatalf("parseFeed: %v", err)
+	}
+	// Item 3 duplicates item 2's link and should be removed only by
+	// dedupAndSort, not by parseFeed itself — parseFeed returns raw items.
+	if len(items) != 3 {
+		t.Fatalf("expected 3 raw items, got %d", len(items))
+	}
+
+	first := items[0]
+	if first.Title != "Первая новость" {
+		t.Errorf("unexpected title: %q", first.Title)
+	}
+	if first.Link != "https://example.com/1" {
+		t.Errorf("unexpected link: %q", first.Link)
+	}
+	wantSummary := "Это первое предложение. Это второе предложение! А это третье?"
+	if first.Summary != wantSummary {
+		t.Errorf("summary = %q, want %q", first.Summary, wantSummary)
+	}
+	if first.PublishedAt.IsZero() {
+		t.Error("expected non-zero PublishedAt")
+	}
+
+	second := items[1]
+	if len([]rune(second.Summary)) > summaryFallbackMaxLen+1 {
+		t.Errorf("fallback summary too long: %d runes", len([]rune(second.Summary)))
+	}
+	if second.Summary == "" {
+		t.Error("expected non-empty fallback summary for punctuation-less description")
+	}
+
+	third := items[2]
+	if third.Summary != "" {
+		t.Errorf("expected empty summary for empty description, got %q", third.Summary)
+	}
+	if !third.PublishedAt.IsZero() {
+		t.Error("expected zero time for missing pubDate")
+	}
+}
+
+func TestParseFeedAtom(t *testing.T) {
+	items, err := parseFeed([]byte(sampleAtom))
+	if err != nil {
+		t.Fatalf("parseFeed: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(items))
+	}
+	it := items[0]
+	if it.Title != "Atom-новость" {
+		t.Errorf("unexpected title: %q", it.Title)
+	}
+	if it.Link != "https://example.com/atom/1" {
+		t.Errorf("unexpected link: %q", it.Link)
+	}
+	if it.Summary != "Одно предложение в саммари." {
+		t.Errorf("unexpected summary: %q", it.Summary)
+	}
+}
+
+func TestParseFeedInvalidXML(t *testing.T) {
+	if _, err := parseFeed([]byte("not xml at all")); err == nil {
+		t.Fatal("expected error for invalid XML")
+	}
+}
+
+func TestDedupAndSortByScore(t *testing.T) {
+	items, err := parseFeed([]byte(sampleRSS))
+	if err != nil {
+		t.Fatalf("parseFeed: %v", err)
+	}
+	now := time.Date(2026, 7, 13, 10, 0, 0, 0, time.UTC)
+	for i := range items {
+		items[i].Score = scoreItem(items[i], now)
+	}
+	out := dedupAndSort(items)
+
+	if len(out) != 2 {
+		t.Fatalf("expected 2 items after dedup, got %d", len(out))
+	}
+	// "Срочно: важная новость" matches a keyword and should outrank the
+	// plain first item despite being slightly older.
+	if !strings.Contains(out[0].Title, "Срочно") {
+		t.Errorf("expected keyword-matching item first, got %q", out[0].Title)
+	}
+	if out[0].Score <= out[1].Score {
+		t.Errorf("expected descending score order: %v then %v", out[0].Score, out[1].Score)
+	}
+}
+
+func TestExtractSummaryEmptyInput(t *testing.T) {
+	if got := extractSummary(""); got != "" {
+		t.Errorf("expected empty summary, got %q", got)
+	}
+	if got := extractSummary("   <p></p>  "); got != "" {
+		t.Errorf("expected empty summary for whitespace/markup-only input, got %q", got)
+	}
+}
+
+func TestExtractSummaryStopsAtThreeSentences(t *testing.T) {
+	text := "Одно. Два. Три. Четыре. Пять."
+	got := extractSummary(text)
+	want := "Одно. Два. Три."
+	if got != want {
+		t.Errorf("extractSummary = %q, want %q", got, want)
+	}
+}
+
+func TestExtractSummaryHandlesAbbreviations(t *testing.T) {
+	text := "Профессор А. С. Иванов и др. представили доклад. Это второе предложение."
+	got := extractSummary(text)
+	if !strings.HasSuffix(got, "Это второе предложение.") {
+		t.Errorf("abbreviation caused a false sentence split: %q", got)
+	}
+}
+
+func TestScoreItemRecencyDecay(t *testing.T) {
+	now := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
+	fresh := scoreItem(provider.NewsItem{PublishedAt: now}, now)
+	old := scoreItem(provider.NewsItem{PublishedAt: now.Add(-30 * 24 * time.Hour)}, now)
+	if fresh <= old {
+		t.Errorf("expected fresher item to score higher: fresh=%v old=%v", fresh, old)
+	}
+}

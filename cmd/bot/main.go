@@ -8,11 +8,17 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/nyver2k/remindertgbot/internal/clock"
 	"github.com/nyver2k/remindertgbot/internal/config"
 	"github.com/nyver2k/remindertgbot/internal/nlu"
 	"github.com/nyver2k/remindertgbot/internal/observability"
+	"github.com/nyver2k/remindertgbot/internal/provider"
 	"github.com/nyver2k/remindertgbot/internal/provider/iptvx"
 	"github.com/nyver2k/remindertgbot/internal/provider/price"
+	"github.com/nyver2k/remindertgbot/internal/provider/rss"
+	"github.com/nyver2k/remindertgbot/internal/provider/travel"
+	"github.com/nyver2k/remindertgbot/internal/provider/tvschedule"
+	"github.com/nyver2k/remindertgbot/internal/scheduler"
 	"github.com/nyver2k/remindertgbot/internal/storage/postgres"
 	"github.com/nyver2k/remindertgbot/internal/telegram"
 )
@@ -62,6 +68,41 @@ func main() {
 	defer priceProber.Close()
 	tvScheduler := iptvx.NewScheduler(postgres.NewEPGRepo(db))
 
+	// Read-only provider registry for /run: lets the bot evaluate a reminder
+	// on demand via the same scheduler.Evaluator the worker uses, without
+	// running any background jobs (e.g. iptvx.Provider.Lookup queries the DB
+	// the worker already keeps fresh; its Run() import loop is not started here).
+	registry := provider.NewRegistry()
+	if cfg.Providers.IPTVX.URL != "" {
+		registry.RegisterEvent(iptvx.New(iptvx.Config{
+			URL:            cfg.Providers.IPTVX.URL,
+			FilePath:       cfg.Providers.IPTVX.FilePath,
+			UpdateInterval: cfg.Providers.IPTVX.UpdateInterval,
+			Timeout:        cfg.Providers.IPTVX.Timeout,
+		}, postgres.NewEPGRepo(db), log))
+	} else {
+		registry.RegisterEvent(tvschedule.New(tvschedule.Config{
+			BaseURL: cfg.Providers.TV.BaseURL,
+			APIKey:  cfg.Providers.TV.APIKey,
+			Timeout: cfg.Providers.TV.Timeout,
+		}, log))
+	}
+	registry.RegisterMetric(priceProber)
+	airP := travel.NewAirProvider(cfg.Providers.Travel.AirAPIKey, log)
+	railP := travel.NewRailProvider(cfg.Providers.Travel.RailAPIKey, log)
+	registry.RegisterSearch(travel.NewAggregator(log, airP, railP))
+	registry.RegisterNews(rss.New(cfg.Providers.RSS.Timeout, log))
+
+	evaluator := scheduler.NewEvaluator(registry, observationRepo, clock.Real(), cfg.Providers.Travel.MaxHorizonDays, log)
+	if cfg.Providers.RSS.LLMDigest {
+		ranker, err := nlu.NewConfiguredNewsRanker(cfg.NLU.Provider, cfg.NLU.APIKey, model, baseURL, cfg.NLU.OpenRouter.FallbackModels, cfg.NLU.OpenRouter.Timeout, cfg.NLU.OpenRouter.MaxTokens)
+		if err != nil {
+			log.Error("rss llm_digest init", "err", err)
+			os.Exit(1)
+		}
+		evaluator.SetNewsRanker(ranker)
+	}
+
 	handler := telegram.NewHandler(
 		telegram.NewReminderService(reminderRepo),
 		telegram.NewUserService(userRepo),
@@ -70,6 +111,7 @@ func main() {
 		priceProber,
 		observationRepo,
 		tvScheduler,
+		evaluator,
 		cfg.Providers.Price.PollCron,
 		log,
 	)

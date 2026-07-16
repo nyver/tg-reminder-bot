@@ -53,6 +53,14 @@ var (
 	reEveryDay = regexp.MustCompile(`(?i)каждый?\s+день\s+в\s+(\d{1,2})[:.](\d{2})\s+(.+)`)
 
 	reURLExtract = regexp.MustCompile(`https?://\S+`)
+
+	// reRSSDigestKeyword matches a request for a periodic news digest, e.g.
+	// "дайджест новостей". Combined with a URL, this identifies an rss digest
+	// reminder — checked before reRecurring/reAbsolute so a leading "каждый
+	// день в HH:MM" doesn't get misread as a plain recurring text reminder.
+	reRSSDigestKeyword = regexp.MustCompile(`(?i)дайджест`)
+	reHHMM             = regexp.MustCompile(`\b([01]?\d|2[0-3])[:.]([0-5]\d)\b`)
+	reTopN             = regexp.MustCompile(`(?i)топ[- ]?(\d+)|(\d+)\s+новост`)
 )
 
 func (p *FastPath) Parse(ctx context.Context, text string) (*ParseResult, error) {
@@ -64,6 +72,9 @@ func (p *FastPath) Parse(ctx context.Context, text string) (*ParseResult, error)
 	if r := parsePriceDrop(text); r != nil {
 		return r, nil
 	}
+	if r := parseRSSDigest(text); r != nil {
+		return r, nil
+	}
 	if m := reRecurring.FindStringSubmatch(text); m != nil {
 		return p.parseRecurring(m), nil
 	}
@@ -71,6 +82,55 @@ func (p *FastPath) Parse(ctx context.Context, text string) (*ParseResult, error)
 		return p.parseAbsolute(m), nil
 	}
 	return &ParseResult{Spec: &domain.Spec{}, Confidence: 0}, nil
+}
+
+// parseRSSDigest detects "<...дайджест...> <...HH:MM...> <URL>" phrasings,
+// e.g. "каждый день в 18:00 создай дайджест новостей на основе <ссылка>".
+// The time and top-N are optional; the digest keyword and URL are required.
+func parseRSSDigest(text string) *ParseResult {
+	if !reRSSDigestKeyword.MatchString(text) {
+		return nil
+	}
+	u := ExtractURL(text)
+	if u == "" {
+		return nil
+	}
+	// Search for time/top-N outside the URL so path segments in the feed
+	// link (rare, but possible) can't be misread as HH:MM or an item count.
+	rest := strings.Replace(text, u, "", 1)
+
+	cron := "0 9 * * *"
+	if m := reHHMM.FindStringSubmatch(rest); m != nil {
+		h, _ := strconv.Atoi(m[1])
+		min, _ := strconv.Atoi(m[2])
+		cron = fmt.Sprintf("%d %d * * *", min, h)
+	}
+
+	topN := 0
+	if m := reTopN.FindStringSubmatch(rest); m != nil {
+		nStr := m[1]
+		if nStr == "" {
+			nStr = m[2]
+		}
+		if n, err := strconv.Atoi(nStr); err == nil && n > 0 {
+			topN = n
+		}
+	}
+
+	return &ParseResult{
+		Kind:     domain.KindConditional,
+		EvalCron: cron,
+		Spec: &domain.Spec{
+			Trigger: domain.TriggerDigest,
+			Message: "RSS-дайджест новостей",
+			TopN:    topN,
+			Event: domain.EventSpec{
+				Type:   "rss",
+				Params: map[string]string{"url": u},
+			},
+		},
+		Confidence: 0.97,
+	}
 }
 
 // parsePriceDrop detects "URL ... уведоми при снижении цены [каждые N часов]" patterns.

@@ -123,6 +123,103 @@ func TestFastPathParsesURLPriceDrop(t *testing.T) {
 	}
 }
 
+func TestFastPathParsesRSSDigest(t *testing.T) {
+	t.Parallel()
+	parser := NewFastPath(time.UTC)
+
+	result, err := parser.Parse(context.Background(), "каждый день в 18:00 создай дайджест новостей на основе https://lenta.ru/rss")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Kind != domain.KindConditional || result.Spec.Trigger != domain.TriggerDigest {
+		t.Fatalf("unexpected kind/trigger: %+v", result)
+	}
+	if result.Spec.Event.Type != "rss" {
+		t.Fatalf("event.type = %q, want rss", result.Spec.Event.Type)
+	}
+	if got := result.Spec.Event.Params["url"]; got != "https://lenta.ru/rss" {
+		t.Fatalf("url = %q", got)
+	}
+	if result.EvalCron != "0 18 * * *" {
+		t.Fatalf("eval_cron = %q, want %q", result.EvalCron, "0 18 * * *")
+	}
+}
+
+func TestFastPathRSSDigestDefaultsAndTopN(t *testing.T) {
+	t.Parallel()
+	parser := NewFastPath(time.UTC)
+
+	result, err := parser.Parse(context.Background(), "дайджест новостей по ленте https://lenta.ru/rss")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.EvalCron != "0 9 * * *" {
+		t.Fatalf("eval_cron = %q, want default 0 9 * * *", result.EvalCron)
+	}
+	if result.Spec.TopN != 0 {
+		t.Fatalf("top_n = %d, want 0 (evaluator applies its own default)", result.Spec.TopN)
+	}
+
+	result, err = parser.Parse(context.Background(), "дайджест новостей топ 10 по ленте https://lenta.ru/rss")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Spec.TopN != 10 {
+		t.Fatalf("top_n = %d, want 10", result.Spec.TopN)
+	}
+}
+
+// TestFastPathIgnoresRSSDigestWithoutURL checks that a "дайджест" message
+// without a URL is not misclassified as an rss digest reminder — it falls
+// through to the plain recurring-text pattern instead.
+func TestFastPathIgnoresRSSDigestWithoutURL(t *testing.T) {
+	t.Parallel()
+	parser := NewFastPath(time.UTC)
+
+	result, err := parser.Parse(context.Background(), "каждый день в 18:00 покажи дайджест новостей")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Spec.Event.Type == "rss" {
+		t.Fatalf("expected no rss match without a URL, got %+v", result)
+	}
+}
+
+func TestMapToResultInfersRSSEventTrigger(t *testing.T) {
+	resp := &llmResponse{
+		Kind:       "conditional",
+		Message:    "дайджест новостей",
+		Confidence: 0.9,
+		Event:      llmEvent{Type: "rss", Params: map[string]string{"url": "https://lenta.ru/rss"}},
+		// trigger intentionally missing — inferred from event.type
+	}
+	result, err := mapToResult(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Spec.Trigger != domain.TriggerDigest {
+		t.Fatalf("trigger = %q, want digest", result.Spec.Trigger)
+	}
+}
+
+func TestMapToResultRescuesRSSURLFromMessage(t *testing.T) {
+	resp := &llmResponse{
+		Kind:       "conditional",
+		Trigger:    "digest",
+		Message:    "дайджест новостей https://lenta.ru/rss",
+		Confidence: 0.9,
+		Event:      llmEvent{Type: "rss"},
+		// URL is in message, not in event.params
+	}
+	result, err := mapToResult(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := result.Spec.Event.Params["url"]; got != "https://lenta.ru/rss" {
+		t.Fatalf("url = %q", got)
+	}
+}
+
 func TestMapToResultInfersPriceEventType(t *testing.T) {
 	resp := &llmResponse{
 		Kind:       "conditional",

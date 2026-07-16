@@ -323,7 +323,7 @@ func buildPrompt(text string, now time.Time) string {
   lead_time   "3h"  "24h" "168h"              (для anchor: часы; день=24h, неделя=168h)
   top_n       5                               (для digest)
   horizon_days 30                             (для digest/anchor)
-  event.type  tv_program|price|travel         (для conditional)
+  event.type  tv_program|price|travel|rss     (для conditional)
   event.title название                        (для tv_program/price)
   event.params {"url":"..."} и т.д.
   confidence  0.0-1.0                         (обязательно)
@@ -340,6 +340,8 @@ func buildPrompt(text string, now time.Time) string {
 - «каждые 30 минут» при снижении цены → eval_cron="*/30 * * * *"
 - «каждый час» / «раз в час» при снижении цены → eval_cron="0 * * * *"
 - «5 дешёвых билетов СПб→Калининград» → kind=conditional, trigger=digest, event.type=travel
+- «каждый день в 18:00 создай дайджест новостей на основе <URL>» → kind=conditional, trigger=digest, event.type=rss, event.params.url=<URL>, eval_cron="0 18 * * *"
+- «дайджест новостей по ленте <URL> топ 10 в 8 утра» → kind=conditional, trigger=digest, event.type=rss, event.params.url=<URL>, top_n=10, eval_cron="0 8 * * *"
 - horizon_days: «неделя»→7, «месяц»→30, «2 недели»→14, default→30
 - confidence: 0.9+ ясно, 0.5-0.9 допущения, <0.5 неясно
 
@@ -391,7 +393,7 @@ func mapToResult(resp *llmResponse) (*ParseResult, error) {
 			spec.Trigger = domain.TriggerThreshold
 		case "tv_program":
 			spec.Trigger = domain.TriggerAnchor
-		case "travel":
+		case "travel", "rss":
 			spec.Trigger = domain.TriggerDigest
 		}
 	}
@@ -408,8 +410,8 @@ func mapToResult(resp *llmResponse) (*ParseResult, error) {
 		}
 	}
 
-	// If price reminder but URL landed in message instead of event.params, rescue it.
-	if spec.Event.Type == "price" && (spec.Event.Params == nil || spec.Event.Params["url"] == "") {
+	// If price/rss reminder but URL landed in message instead of event.params, rescue it.
+	if (spec.Event.Type == "price" || spec.Event.Type == "rss") && (spec.Event.Params == nil || spec.Event.Params["url"] == "") {
 		if u := ExtractURL(resp.Message); u != "" {
 			if spec.Event.Params == nil {
 				spec.Event.Params = make(map[string]string)

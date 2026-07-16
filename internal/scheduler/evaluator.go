@@ -31,19 +31,38 @@ type HistoryRepo interface {
 	Save(ctx context.Context, obs *domain.Observation) error
 }
 
+// NewsRanker optionally replaces the keyword+recency heuristic
+// provider.NewsProvider applies to an RSS/Atom digest with an LLM judgment
+// call: given a heuristically pre-filtered candidate pool, pick and
+// re-summarize the topN most genuinely important items. It is optional —
+// see Evaluator.SetNewsRanker — and additive: a nil ranker, or any error
+// from Rank, leaves the heuristic's own ranking untouched.
+type NewsRanker interface {
+	Rank(ctx context.Context, candidates []provider.NewsItem, topN int) ([]provider.NewsItem, error)
+}
+
 // Evaluator converts a Reminder into zero or more PlannedNotifications.
 type Evaluator struct {
 	registry       providerRegistry
 	history        HistoryRepo
 	clock          clock.Clock
 	maxHorizonDays int
+	newsRanker     NewsRanker // optional, see SetNewsRanker
 	log            *slog.Logger
+}
+
+// SetNewsRanker enables optional LLM-based ranking/summarization for RSS
+// digests (see NewsRanker). Not set by NewEvaluator so existing call sites
+// and tests are unaffected; callers opt in explicitly.
+func (e *Evaluator) SetNewsRanker(r NewsRanker) {
+	e.newsRanker = r
 }
 
 type providerRegistry interface {
 	Event(typ string) (provider.EventProvider, bool)
 	Metric(typ string) (provider.MetricProvider, bool)
 	Search(typ string) (provider.SearchProvider, bool)
+	News(typ string) (provider.NewsProvider, bool)
 }
 
 func NewEvaluator(registry providerRegistry, history HistoryRepo, clk clock.Clock, maxHorizonDays int, log *slog.Logger) *Evaluator {
@@ -252,6 +271,10 @@ func (e *Evaluator) evaluateThreshold(ctx context.Context, r domain.Reminder) ([
 // --- digest ---
 
 func (e *Evaluator) evaluateDigest(ctx context.Context, r domain.Reminder) ([]PlannedNotification, error) {
+	if r.Spec.Event.Type == "rss" {
+		return e.evaluateNewsDigest(ctx, r)
+	}
+
 	sp, ok := e.registry.Search(r.Spec.Event.Type)
 	if !ok {
 		return nil, fmt.Errorf("no search provider for %q", r.Spec.Event.Type)
@@ -291,6 +314,77 @@ func (e *Evaluator) evaluateDigest(ctx context.Context, r domain.Reminder) ([]Pl
 		Text:           text,
 		IdempotencyKey: key,
 	}}, nil
+}
+
+// evaluateNewsDigest handles event.type=="rss": fetch the feed, keep the
+// top-N most important items, and render a digest. Unlike the travel digest
+// above, idempotency is scoped per-reminder (not per-user) because a single
+// user can configure several independent /rss subscriptions in one day.
+func (e *Evaluator) evaluateNewsDigest(ctx context.Context, r domain.Reminder) ([]PlannedNotification, error) {
+	np, ok := e.registry.News(r.Spec.Event.Type)
+	if !ok {
+		return nil, fmt.Errorf("no news provider for %q", r.Spec.Event.Type)
+	}
+	now := e.clock.Now()
+
+	items, err := np.Fetch(ctx, provider.Query{
+		Title:  r.Spec.Event.Title,
+		Params: r.Spec.Event.Params,
+	})
+	if err != nil {
+		e.log.Warn("rss fetch failed, will retry next tick",
+			"reminder_id", r.ID,
+			"err", err,
+		)
+		return nil, nil
+	}
+
+	topN := orDefault(r.Spec.TopN, 5)
+	items = e.rankNews(ctx, r, items, topN)
+	if len(items) > topN {
+		items = items[:topN]
+	}
+	if len(items) == 0 {
+		return nil, nil
+	}
+
+	rawJSON, _ := json.Marshal(items)
+	if err := e.history.Save(ctx, &domain.Observation{
+		ReminderID: r.ID,
+		Available:  true,
+		Raw:        rawJSON,
+		ObservedAt: now,
+	}); err != nil {
+		e.log.Warn("save rss digest observation failed", "reminder_id", r.ID, "err", err)
+	}
+
+	text := renderNewsDigest(r.Spec, items)
+	key := idemKey(r.ID, "rss_digest:"+now.In(userTZ(r)).Format("2006-01-02"))
+	return []PlannedNotification{{
+		FireAt:         now,
+		Text:           text,
+		IdempotencyKey: key,
+	}}, nil
+}
+
+// rankNews applies the optional LLM ranker to a heuristic candidate pool.
+// It never fails the digest: on any error, or if no ranker is configured, it
+// returns the heuristic's own order unchanged (see NewsRanker).
+func (e *Evaluator) rankNews(ctx context.Context, r domain.Reminder, items []provider.NewsItem, topN int) []provider.NewsItem {
+	if e.newsRanker == nil || len(items) == 0 {
+		return items
+	}
+	const poolMultiplier = 3
+	pool := items
+	if max := topN * poolMultiplier; max > 0 && max < len(pool) {
+		pool = pool[:max]
+	}
+	ranked, err := e.newsRanker.Rank(ctx, pool, topN)
+	if err != nil || len(ranked) == 0 {
+		e.log.Warn("llm news ranking unavailable, using heuristic order", "reminder_id", r.ID, "err", err)
+		return items
+	}
+	return ranked
 }
 
 func (e *Evaluator) buildSearchQuery(r domain.Reminder, from, to time.Time) provider.SearchQuery {
@@ -472,6 +566,31 @@ func renderDigest(spec domain.Spec, offers []provider.Offer, prev *domain.Observ
 			formatPrice(o.Price, o.Currency),
 			o.BookURL,
 		))
+	}
+	return sb.String()
+}
+
+func renderNewsDigest(spec domain.Spec, items []provider.NewsItem) string {
+	var sb strings.Builder
+	title := spec.Event.Title
+	if title == "" {
+		title = "RSS-дайджест"
+	}
+	sb.WriteString(fmt.Sprintf("📰 *%s* — %d важных новостей\n\n", title, len(items)))
+
+	for i, it := range items {
+		sb.WriteString(fmt.Sprintf("%d. %s", i+1, it.Title))
+		if !it.PublishedAt.IsZero() {
+			sb.WriteString(" · " + it.PublishedAt.Format("02.01 15:04"))
+		}
+		sb.WriteString("\n")
+		if it.Summary != "" {
+			sb.WriteString("   " + it.Summary + "\n")
+		}
+		if it.Link != "" {
+			sb.WriteString("   " + it.Link + "\n")
+		}
+		sb.WriteString("\n")
 	}
 	return sb.String()
 }

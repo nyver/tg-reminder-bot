@@ -53,6 +53,7 @@ type ProvidersConfig struct {
 	IPTVX  IPTVXConfig  `yaml:"iptvx"`
 	Price  PriceConfig  `yaml:"price"`
 	Travel TravelConfig `yaml:"travel"`
+	RSS    RSSConfig    `yaml:"rss"`
 }
 
 type TVConfig struct {
@@ -83,6 +84,16 @@ type TravelConfig struct {
 	RailAPIKey     string        `yaml:"rail_api_key"`
 	Timeout        time.Duration `yaml:"timeout"`
 	MaxHorizonDays int           `yaml:"max_horizon_days"`
+}
+
+type RSSConfig struct {
+	// Timeout is the deadline for fetching and reading one RSS/Atom feed.
+	Timeout time.Duration `yaml:"timeout"`
+	// LLMDigest enables optional LLM-based re-ranking and re-summarization of
+	// digest items (using the nlu provider/model configuration), replacing
+	// the keyword+recency heuristic. Off by default: it adds one LLM call
+	// per digest tick.
+	LLMDigest bool `yaml:"llm_digest"`
 }
 
 type SchedulerConfig struct {
@@ -184,6 +195,9 @@ func defaults() *Config {
 			Travel: TravelConfig{
 				Timeout:        10 * time.Second,
 				MaxHorizonDays: 180,
+			},
+			RSS: RSSConfig{
+				Timeout: 15 * time.Second,
 			},
 		},
 		Scheduler: SchedulerConfig{
@@ -293,6 +307,9 @@ func (cfg *Config) Validate() error {
 	}
 	if cfg.Providers.Travel.MaxHorizonDays <= 0 {
 		return fmt.Errorf("config: providers.travel.max_horizon_days must be positive")
+	}
+	if cfg.Providers.RSS.Timeout <= 0 {
+		return fmt.Errorf("config: providers.rss.timeout must be positive")
 	}
 	return nil
 }

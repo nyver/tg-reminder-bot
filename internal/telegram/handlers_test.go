@@ -229,6 +229,57 @@ func TestValidateParseResultRejectsEmptySpec(t *testing.T) {
 	}
 }
 
+func TestValidateParseResultRejectsRSSWithoutURL(t *testing.T) {
+	result := &nlu.ParseResult{
+		Confidence: 0.97,
+		Spec: &domain.Spec{
+			Trigger: domain.TriggerDigest,
+			Event:   domain.EventSpec{Type: "rss"},
+		},
+	}
+	if err := validateParseResult(result); err == nil {
+		t.Fatal("expected validation error for rss reminder without url")
+	}
+}
+
+// TestBuildReminderRSSDigestFromFreeText mirrors the NLU flow for a message
+// like "каждый день в 18:00 создай дайджест новостей на основе <ссылка>":
+// the fast-path parser recognizes it as event.type=rss, and buildReminder
+// must turn it into a conditional reminder on the daily cron it extracted.
+func TestBuildReminderRSSDigestFromFreeText(t *testing.T) {
+	now := time.Date(2026, 6, 21, 17, 30, 0, 0, time.UTC)
+	result := &nlu.ParseResult{
+		Kind:       domain.KindConditional,
+		EvalCron:   "0 18 * * *",
+		Confidence: 0.97,
+		Spec: &domain.Spec{
+			Trigger: domain.TriggerDigest,
+			Message: "RSS-дайджест новостей",
+			Event: domain.EventSpec{
+				Type:   "rss",
+				Params: map[string]string{"url": "https://lenta.ru/rss"},
+			},
+		},
+	}
+
+	rem, err := buildReminder(1, "каждый день в 18:00 создай дайджест новостей на основе https://lenta.ru/rss", result, now, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rem.Kind != domain.KindConditional {
+		t.Fatalf("kind = %q, want conditional", rem.Kind)
+	}
+	if rem.EvalCron != "0 18 * * *" {
+		t.Fatalf("eval_cron = %q, want %q", rem.EvalCron, "0 18 * * *")
+	}
+	if rem.Spec.Event.Type != "rss" || rem.Spec.Event.Params["url"] != "https://lenta.ru/rss" {
+		t.Fatalf("unexpected event spec: %+v", rem.Spec.Event)
+	}
+	if rem.NextEvalAt == nil {
+		t.Fatal("expected NextEvalAt to be set")
+	}
+}
+
 // TestBuildAbsoluteNonAnchorReminderPreservesFireAt ensures that absolute
 // reminders WITHOUT an anchor trigger (e.g. "напомни завтра в 9:00 позвонить")
 // still use the user-specified fire time for NextEvalAt.
@@ -255,5 +306,77 @@ func TestBuildAbsoluteNonAnchorReminderPreservesFireAt(t *testing.T) {
 	}
 	if !rem.NextEvalAt.Equal(want) {
 		t.Fatalf("NextEvalAt = %v, want %v", rem.NextEvalAt, want)
+	}
+}
+
+func TestParseRSSArgsDefaults(t *testing.T) {
+	feedURL, hour, minute, topN, err := parseRSSArgs("https://lenta.ru/rss")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if feedURL != "https://lenta.ru/rss" {
+		t.Errorf("feedURL = %q", feedURL)
+	}
+	if hour != rssDefaultCronHour || minute != rssDefaultCronMinute {
+		t.Errorf("time = %02d:%02d, want default %02d:%02d", hour, minute, rssDefaultCronHour, rssDefaultCronMinute)
+	}
+	if topN != rssDefaultTopN {
+		t.Errorf("topN = %d, want default %d", topN, rssDefaultTopN)
+	}
+}
+
+func TestParseRSSArgsCustomTimeAndTopN(t *testing.T) {
+	feedURL, hour, minute, topN, err := parseRSSArgs("https://lenta.ru/rss | 08:30 | 10")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if feedURL != "https://lenta.ru/rss" || hour != 8 || minute != 30 || topN != 10 {
+		t.Errorf("got url=%q hour=%d minute=%d topN=%d", feedURL, hour, minute, topN)
+	}
+}
+
+func TestParseRSSArgsRejectsInvalidURL(t *testing.T) {
+	cases := []string{"", "not-a-url", "ftp://lenta.ru/rss", "   "}
+	for _, payload := range cases {
+		if _, _, _, _, err := parseRSSArgs(payload); err == nil {
+			t.Errorf("payload %q: expected error, got nil", payload)
+		}
+	}
+}
+
+func TestParseRSSArgsRejectsTopNOutOfRange(t *testing.T) {
+	if _, _, _, _, err := parseRSSArgs("https://lenta.ru/rss | 09:00 | 0"); err == nil {
+		t.Error("expected error for topN=0")
+	}
+	if _, _, _, _, err := parseRSSArgs("https://lenta.ru/rss | 09:00 | 21"); err == nil {
+		t.Error("expected error for topN=21")
+	}
+}
+
+func TestParseRSSArgsRejectsUnknownExtraParam(t *testing.T) {
+	if _, _, _, _, err := parseRSSArgs("https://lenta.ru/rss | garbage"); err == nil {
+		t.Error("expected error for unrecognized extra parameter")
+	}
+}
+
+func TestFeedHostStripsWWW(t *testing.T) {
+	cases := map[string]string{
+		"https://www.lenta.ru/rss":        "lenta.ru",
+		"https://lenta.ru/rss":            "lenta.ru",
+		"http://sub.example.com/feed.xml": "sub.example.com",
+	}
+	for url, want := range cases {
+		if got := feedHost(url); got != want {
+			t.Errorf("feedHost(%q) = %q, want %q", url, got, want)
+		}
+	}
+}
+
+func TestCronToHHMM(t *testing.T) {
+	if got := cronToHHMM("30 8 * * *"); got != "08:30" {
+		t.Errorf("cronToHHMM = %q, want 08:30", got)
+	}
+	if got := cronToHHMM("not a cron"); got != "not a cron" {
+		t.Errorf("cronToHHMM fallback = %q", got)
 	}
 }

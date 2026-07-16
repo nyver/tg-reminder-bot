@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"github.com/nyver2k/remindertgbot/internal/domain"
 	"github.com/nyver2k/remindertgbot/internal/nlu"
 	"github.com/nyver2k/remindertgbot/internal/provider"
+	"github.com/nyver2k/remindertgbot/internal/scheduler"
 	"github.com/robfig/cron/v3"
 	tele "gopkg.in/telebot.v3"
 )
@@ -55,6 +57,7 @@ type Handler struct {
 	prices               PriceProber          // optional
 	history              PriceHistory         // optional, for /refresh delta
 	schedule             provider.TVScheduler // optional
+	evaluator            *scheduler.Evaluator // optional, for /run
 	priceDefaultPollCron string
 	log                  *slog.Logger
 }
@@ -67,6 +70,7 @@ func NewHandler(
 	prices PriceProber,
 	history PriceHistory,
 	schedule provider.TVScheduler,
+	evaluator *scheduler.Evaluator,
 	priceDefaultPollCron string,
 	log *slog.Logger,
 ) *Handler {
@@ -78,6 +82,7 @@ func NewHandler(
 		prices:               prices,
 		history:              history,
 		schedule:             schedule,
+		evaluator:            evaluator,
 		priceDefaultPollCron: priceDefaultPollCron,
 		log:                  log,
 	}
@@ -92,8 +97,10 @@ func (h *Handler) RegisterRoutes(bot *tele.Bot) {
 	bot.Handle("/pause", h.handlePause)
 	bot.Handle("/resume", h.handleResume)
 	bot.Handle("/refresh", h.handleRefresh)
+	bot.Handle("/run", h.handleRun)
 	bot.Handle("/tz", h.handleTZ)
 	bot.Handle("/tv", h.handleTV)
+	bot.Handle("/rss", h.handleRSS)
 	bot.Handle(tele.OnText, h.handleText)
 	bot.Handle("\fconfirm_yes", h.handleConfirmYes)
 	bot.Handle("\fconfirm_no", h.handleConfirmNo)
@@ -157,6 +164,14 @@ func (h *Handler) handleList(c tele.Context) error {
 				sb.WriteString("📌 " + escapeMarkdown(title) + "\n")
 			}
 			sb.WriteString(fmt.Sprintf("`/refresh %s`\n", r.ID.String()))
+		}
+		if r.Spec.Trigger == domain.TriggerDigest && r.Spec.Event.Type == "rss" {
+			if u := r.Spec.Event.Params["url"]; u != "" {
+				sb.WriteString("📰 " + escapeMarkdown(u) + "\n")
+			}
+			if r.EvalCron != "" {
+				sb.WriteString(fmt.Sprintf("🕐 Рассылка: `%s`\n", escapeMarkdown(cronToHHMM(r.EvalCron))))
+			}
 		}
 		sb.WriteString(fmt.Sprintf("`/cancel %s`\n`/remove %s`\n\n", r.ID.String(), r.ID.String()))
 	}
@@ -270,6 +285,57 @@ func (h *Handler) handleRefresh(c tele.Context) error {
 		sb.WriteString("🔗 " + escapeMarkdown(u))
 	}
 	return c.Send(sb.String(), tele.ModeMarkdownV2)
+}
+
+// handleRun forces immediate evaluation of a configured reminder, regardless
+// of its trigger type or cron schedule (e.g. running an RSS/travel digest
+// reminder immediately generates and sends that digest). It reuses the same
+// scheduler.Evaluator the worker runs on each tick, but sends the resulting
+// text straight to the chat instead of going through the persisted
+// notification queue — so a manual run is never silently deduplicated by the
+// per-day idempotency key a scheduled digest uses, and it never disturbs the
+// reminder's own NextEvalAt/cron progression.
+func (h *Handler) handleRun(c tele.Context) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	args := strings.TrimSpace(c.Message().Payload)
+	if args == "" {
+		return c.Send("Укажите ID напоминания: `/run <id>`", tele.ModeMarkdown)
+	}
+	id, err := uuid.Parse(args)
+	if err != nil {
+		return c.Send("Неверный ID напоминания.")
+	}
+	if h.evaluator == nil {
+		return c.Send("Принудительный запуск сейчас недоступен.")
+	}
+
+	rem, err := h.reminders.Get(ctx, c.Sender().ID, id)
+	if err != nil {
+		return c.Send("Напоминание не найдено.")
+	}
+	if u, err := h.users.GetOrCreate(ctx, c.Sender().ID); err == nil {
+		rem.UserTZ = u.TZ
+	}
+
+	_ = c.Bot().Notify(c.Sender(), tele.Typing)
+
+	runCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	planned, err := h.evaluator.Evaluate(runCtx, *rem)
+	if err != nil {
+		h.log.Error("manual run evaluate", "id", rem.ID, "err", err)
+		return c.Send("Ошибка при выполнении напоминания. Попробуйте позже.")
+	}
+	if len(planned) == 0 {
+		return c.Send("Сейчас отправлять нечего: условие не выполнено или данные недоступны.")
+	}
+	for _, p := range planned {
+		if err := c.Send(p.Text); err != nil {
+			h.log.Error("manual run send", "id", rem.ID, "err", err)
+		}
+	}
+	return nil
 }
 
 func (h *Handler) handlePause(c tele.Context) error {
@@ -569,6 +635,147 @@ func writeTVShows(sb *strings.Builder, shows []provider.TVShowtime, fallbackChan
 			sb.WriteString("  `" + timeStr + "` — " + escapeMarkdown(show.Title) + "\n")
 		}
 	}
+}
+
+// rssDefaultCronHour/Minute — daily digest time used when the user does not
+// specify one explicitly.
+const (
+	rssDefaultCronHour   = 9
+	rssDefaultCronMinute = 0
+	rssDefaultTopN       = 5
+	rssMinTopN           = 1
+	rssMaxTopN           = 20
+)
+
+func (h *Handler) handleRSS(c tele.Context) error {
+	args := strings.TrimSpace(c.Message().Payload)
+	if args == "" {
+		return c.Send(
+			"Использование:\n"+
+				"`/rss https://example.com/feed.xml` — дайджест важных новостей ежедневно в 09:00 (топ-5)\n"+
+				"`/rss https://example.com/feed.xml | 08:30` — своё время рассылки\n"+
+				"`/rss https://example.com/feed.xml | 08:30 | 10` — своё время и число новостей (1–20)",
+			tele.ModeMarkdown,
+		)
+	}
+
+	feedURL, hour, minute, topN, err := parseRSSArgs(args)
+	if err != nil {
+		return c.Send("⚠️ " + err.Error())
+	}
+	cronExpr := fmt.Sprintf("%d %d * * *", minute, hour)
+
+	ctx, cancel := context.WithTimeout(context.Background(), handlerTimeout)
+	defer cancel()
+	userID := c.Sender().ID
+
+	userTZ := ""
+	if u, err := h.users.GetOrCreate(ctx, userID); err == nil && u.TZ != "" {
+		userTZ = u.TZ
+	}
+
+	next, err := nextCronAt(cronExpr, time.Now(), userTZ)
+	if err != nil {
+		h.log.Error("rss nextCronAt", "err", err)
+		return c.Send("Ошибка при расчёте расписания рассылки.")
+	}
+
+	rem := &domain.Reminder{
+		UserID:   userID,
+		RawText:  "RSS-дайджест: " + feedURL,
+		Kind:     domain.KindConditional,
+		Status:   domain.StatusActive,
+		EvalCron: cronExpr,
+		Spec: domain.Spec{
+			Trigger: domain.TriggerDigest,
+			TopN:    topN,
+			Event: domain.EventSpec{
+				Type:   "rss",
+				Title:  feedHost(feedURL),
+				Params: map[string]string{"url": feedURL},
+			},
+		},
+		NextEvalAt: &next,
+	}
+	rem.IdempotencyKey = reminderIdemKey(rem)
+
+	if err := h.reminders.Create(ctx, rem); err != nil {
+		if errors.Is(err, domain.ErrAlreadyExists) {
+			return c.Send("ℹ️ У вас уже есть подписка на эту ленту с такими же параметрами.")
+		}
+		h.log.Error("create rss reminder", "err", err)
+		return c.Send("Ошибка при сохранении подписки.")
+	}
+
+	return c.Send(fmt.Sprintf(
+		"✅ Дайджест настроен: *%s*\nВремя рассылки: `%02d:%02d`\nЧисло новостей: *%d*\n\n`/cancel %s` — отменить\n`/pause %s` — приостановить",
+		escapeMarkdown(feedHost(feedURL)), hour, minute, topN, rem.ID.String(), rem.ID.String(),
+	), tele.ModeMarkdown)
+}
+
+// parseRSSArgs parses the /rss payload "<url>[ | HH:MM][ | N]" into its feed
+// URL, daily digest time and top-N item count. It performs a cheap, local
+// validation of the URL (scheme + host) — the full SSRF-safe check happens in
+// provider/rss at evaluation time on the worker, since that's where the
+// request is actually made.
+func parseRSSArgs(payload string) (feedURL string, hour, minute, topN int, err error) {
+	parts := strings.Split(payload, "|")
+	feedURL = strings.TrimSpace(parts[0])
+	if feedURL == "" {
+		return "", 0, 0, 0, fmt.Errorf("укажите ссылку на RSS/Atom-ленту")
+	}
+	u, uerr := url.ParseRequestURI(feedURL)
+	if uerr != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
+		return "", 0, 0, 0, fmt.Errorf("некорректная ссылка: %s", feedURL)
+	}
+
+	hour, minute = rssDefaultCronHour, rssDefaultCronMinute
+	topN = rssDefaultTopN
+	for _, part := range parts[1:] {
+		p := strings.TrimSpace(part)
+		if p == "" {
+			continue
+		}
+		if t, terr := time.Parse("15:04", p); terr == nil {
+			hour, minute = t.Hour(), t.Minute()
+			continue
+		}
+		if n, nerr := strconv.Atoi(p); nerr == nil {
+			if n < rssMinTopN || n > rssMaxTopN {
+				return "", 0, 0, 0, fmt.Errorf("число новостей должно быть от %d до %d", rssMinTopN, rssMaxTopN)
+			}
+			topN = n
+			continue
+		}
+		return "", 0, 0, 0, fmt.Errorf("не удалось разобрать параметр %q (ожидается время ЧЧ:ММ или число)", p)
+	}
+	return feedURL, hour, minute, topN, nil
+}
+
+// feedHost extracts a short display name for a feed URL, e.g.
+// "https://www.lenta.ru/rss" -> "lenta.ru".
+func feedHost(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	return strings.TrimPrefix(u.Hostname(), "www.")
+}
+
+// cronToHHMM converts a "<minute> <hour> * * *" cron expression (as produced
+// by handleRSS) back into "HH:MM" for display in /list. Falls back to the
+// raw expression if it doesn't match that shape.
+func cronToHHMM(cronExpr string) string {
+	fields := strings.Fields(cronExpr)
+	if len(fields) < 2 {
+		return cronExpr
+	}
+	minute, err1 := strconv.Atoi(fields[0])
+	hour, err2 := strconv.Atoi(fields[1])
+	if err1 != nil || err2 != nil {
+		return cronExpr
+	}
+	return fmt.Sprintf("%02d:%02d", hour, minute)
 }
 
 func (h *Handler) handleText(c tele.Context) error {
@@ -1072,6 +1279,13 @@ func validateParseResult(result *nlu.ParseResult) error {
 			if result.Spec.Event.Params["origin"] == "" || result.Spec.Event.Params["destination"] == "" {
 				return fmt.Errorf("travel reminder requires origin and destination")
 			}
+		case "rss":
+			if result.Spec.Trigger != domain.TriggerDigest {
+				return fmt.Errorf("rss reminder requires digest trigger")
+			}
+			if result.Spec.Event.Params["url"] == "" {
+				return fmt.Errorf("rss reminder requires event.params.url")
+			}
 		default:
 			if result.Spec.Event.Title == "" {
 				return fmt.Errorf("conditional reminder is incomplete")
@@ -1165,6 +1379,11 @@ func formatSpec(spec *domain.Spec) string {
 		}
 		sb.WriteString("📉 Уведомить при снижении цены\n")
 	case domain.TriggerDigest:
+		if spec.Event.Type == "rss" {
+			if u := spec.Event.Params["url"]; u != "" {
+				sb.WriteString("📰 " + escapeMarkdown(u) + "\n")
+			}
+		}
 		if spec.TopN > 0 {
 			sb.WriteString(fmt.Sprintf("📋 Топ\\-%d предложений\n", spec.TopN))
 		}
@@ -1272,11 +1491,15 @@ const msgHelp = `*Команды:*
 /pause <id> — приостановить
 /resume <id> — возобновить
 /refresh <id> — запросить текущую цену прямо сейчас
+/run <id> — принудительно запустить напоминание сейчас (например, сгенерировать дайджест)
 /tz <зона> — установить часовой пояс (например, Europe/Moscow)
 /tv <программа> — расписание на ближайшую неделю
 /tv <программа> | <канал> — расписание на конкретном канале
 /tv | <канал> — программа канала на сегодня
 /tv | <канал> 25\.06 — программа канала на дату
+/rss <ссылка> — дайджест важных новостей ежедневно в 09:00 (топ\-5)
+/rss <ссылка> | ЧЧ:ММ — своё время рассылки
+/rss <ссылка> | ЧЧ:ММ | N — своё время и число новостей \(1\-20\)
 /help — эта справка
 
 *Примеры напоминаний:*
