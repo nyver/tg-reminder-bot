@@ -1,8 +1,8 @@
 # Reminder Telegram Bot
 
 A Telegram bot for one-off, recurring, and conditional reminders. The project
-includes Telegram polling, background reminder processing, an HTTP API,
-Prometheus metrics, and a CLI for migrations and administrative operations.
+includes Telegram polling, background reminder processing, and a CLI for
+migrations and administrative operations.
 
 SQLite is used by default, so no separate database server is required for a
 standard deployment. For a local run the database is stored in
@@ -13,7 +13,6 @@ volume.
 
 - `bot` accepts Telegram commands and recognizes reminder text.
 - `worker` evaluates conditions and sends scheduled notifications.
-- `api` provides the HTTP API, health checks, and metrics.
 - `remindctl` runs migrations and administrative commands.
 
 ## Telegram bot commands
@@ -58,7 +57,6 @@ Example messages (the bot's NLU understands Russian):
 каждый понедельник в 8:30 напоминай про совещание
 уведоми за 3 часа до КВН на Первом
 уведоми при снижении цены: https://example.com/product
-каждый день в 9:00 покажи 5 дешёвых билетов из Москвы в Казань на месяц вперёд
 каждый день в 18:00 создай дайджест новостей на основе https://lenta.ru/rss
 ```
 
@@ -98,7 +96,7 @@ Start the application:
 ```bash
 docker compose up --build -d
 docker compose ps
-docker compose logs -f bot worker api
+docker compose logs -f bot worker
 ```
 
 Compose automatically:
@@ -106,15 +104,7 @@ Compose automatically:
 - creates the `reminddata` volume;
 - stores SQLite in `/data/remind.db`;
 - applies migrations before starting the services;
-- publishes the API on `http://localhost:8080`.
-
-API checks:
-
-```bash
-curl http://localhost:8080/healthz
-curl http://localhost:8080/readyz
-curl -H "Authorization: Bearer $ADMIN_API_TOKEN" http://localhost:8080/api/notifications?status=failed
-```
+- starts the Telegram bot and background worker after migrations succeed.
 
 Stop the application:
 
@@ -141,7 +131,11 @@ Main YAML sections:
 - `nlu` — LLM provider, key, and model;
 - `providers` — external source settings;
 - `scheduler` — background task intervals;
-- `server` — API port, worker ID, and log level.
+- `server` — worker ID and log level.
+
+The `providers.travel` fields are reserved for a future live ticket
+integration. Travel reminders are currently rejected; the bot never returns
+sample or fabricated ticket offers.
 
 At `server.log_level: info`, LLM calls are logged with the component
 (`nlu_parser` or `news_ranker`), provider, selected model, and whether the
@@ -183,9 +177,6 @@ variables:
 | `LLM_API_KEY` | OpenRouter or Anthropic key |
 | `EPG_SERVICE_API_KEY` | EPG Service Bearer token |
 | `EPG_SERVICE_BASE_URL` | override for the EPG Service API base URL |
-| `ADMIN_API_TOKEN` | Bearer token for `/api/*` and `/metrics`; the admin API is disabled without it |
-| `API_BIND` | address the API is published on in Docker Compose, default `127.0.0.1` |
-| `API_PORT` | external API port in Docker Compose, default `8080` |
 | `IPTVX_EPG_URL` | XMLTV/XMLTV.GZ URL for the primary TV provider |
 | `IPTVX_EPG_FILE` | path to the local IPTVX EPG cache |
 | `DATABASE_DRIVER` | `sqlite` or `postgres` |
@@ -322,7 +313,7 @@ providers:
     timeout: 15s
     headless: false
     proxy_url: ""
-    poll_cron: "0 9 * * *"
+    poll_cron: "0 * * * *"
 ```
 
 | Field | Description | Default |
@@ -331,13 +322,18 @@ providers:
 | `timeout` | timeout for fetching the page (HTTP or headless) | `15s` |
 | `headless` | use Chromium to bypass WAF/TLS fingerprinting | `false` |
 | `proxy_url` | proxy for the headless browser (HTTP, HTTPS, or SOCKS5) | `""` |
-| `poll_cron` | default poll schedule (5-field cron, UTC) | `"0 9 * * *"` |
+| `poll_cron` | default poll schedule (5-field cron, interpreted in the user's timezone) | `"0 * * * *"` |
 
 Some stores (e.g. DNS-shop) block plain HTTP requests by TLS fingerprint.
 Enable `headless: true` to use a real browser stack. The Docker image
 includes Chromium; the first request in this mode takes 1–2 seconds to
 launch the browser, subsequent ones are much faster thanks to the shared
 Chrome process.
+
+Each headless check runs in an isolated browser context, so cookies and site
+storage cannot leak between users. Price URLs are logged without credentials,
+query parameters, or fragments. Both price and RSS proxy URLs are validated at
+startup and accept only HTTP, HTTPS, SOCKS5, and SOCKS5H schemes.
 
 ## RSS news digest
 
@@ -544,7 +540,6 @@ Services run as separate processes:
 ```bash
 go run ./cmd/bot
 go run ./cmd/worker
-go run ./cmd/api
 ```
 
 Tests, formatting, and static analysis:
@@ -562,20 +557,5 @@ golangci-lint run ./...
 remindctl migrate up|down|status
 remindctl reminders list --user <telegram-user-id>
 remindctl notifications retry <notification-id>
-remindctl provider travel --from <city> --to <city>
 remindctl version
 ```
-
-## HTTP endpoints
-
-- `GET /healthz` — liveness check.
-- `GET /readyz` — readiness check.
-- `GET /metrics` — Prometheus metrics, requires `Authorization: Bearer <ADMIN_API_TOKEN>`.
-- `GET /api/users/{id}/reminders` — a user's reminders.
-- `GET /api/reminders/{id}` — a reminder by ID.
-- `GET /api/reminders/{id}/observations` — observation history.
-- `POST /api/reminders/{id}/cancel` — cancel a reminder.
-- `GET /api/notifications` — notifications.
-- `POST /api/notifications/{id}/retry` — resend a notification.
-
-All `/api/*` endpoints require `Authorization: Bearer <ADMIN_API_TOKEN>`.

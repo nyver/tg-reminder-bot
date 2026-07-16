@@ -158,6 +158,12 @@ func TestSafeClientRejectsMalformedProxyURL(t *testing.T) {
 	}
 }
 
+func TestSafeClientRejectsProxyWithoutHost(t *testing.T) {
+	if _, err := SafeClient(5, "http://"); err == nil {
+		t.Fatal("expected an error for proxy_url without a host")
+	}
+}
+
 func TestIsPrivateHost(t *testing.T) {
 	tests := []struct {
 		host string
@@ -171,6 +177,11 @@ func TestIsPrivateHost(t *testing.T) {
 		{"172.16.0.5", true},
 		{"172.31.255.255", true},
 		{"192.168.0.1", true},
+		{"100.64.0.1", true},
+		{"198.18.0.1", true},
+		{"224.0.0.1", true},
+		{"255.255.255.255", true},
+		{"ff02::1", true},
 		{"8.8.8.8", false},
 		{"example.com", false}, // hostnames resolved separately, not literal IPs
 	}

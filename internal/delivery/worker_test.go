@@ -21,6 +21,7 @@ type mockNotifStore struct {
 	markSent map[uuid.UUID]bool
 	markFail map[uuid.UUID]int
 	updateFa map[uuid.UUID]time.Time
+	retries  map[uuid.UUID]int
 }
 
 func (m *mockNotifStore) LeasePending(ctx context.Context, workerID string, limit int) ([]domain.ScheduledNotification, error) {
@@ -40,11 +41,15 @@ func (m *mockNotifStore) MarkFailed(ctx context.Context, id uuid.UUID, attempts 
 	m.markFail[id] = attempts
 	return nil
 }
-func (m *mockNotifStore) UpdateFireAt(ctx context.Context, id uuid.UUID, fireAt time.Time) error {
+func (m *mockNotifStore) ScheduleRetry(ctx context.Context, id uuid.UUID, attempts int, fireAt time.Time) error {
 	if m.updateFa == nil {
 		m.updateFa = map[uuid.UUID]time.Time{}
 	}
+	if m.retries == nil {
+		m.retries = map[uuid.UUID]int{}
+	}
 	m.updateFa[id] = fireAt
+	m.retries[id] = attempts
 	return nil
 }
 
@@ -85,6 +90,9 @@ func TestDeliverSafeRecoversPanic(t *testing.T) {
 
 	w := NewWorker(store, remStore, panicSender{}, "test", time.Second, testLog)
 	w.deliverSafe(context.Background(), notif) // must not panic
+	if store.retries[notifID] != 1 {
+		t.Fatalf("panic retry attempts = %d, want 1", store.retries[notifID])
+	}
 }
 
 func TestDeliverSendsOnSuccess(t *testing.T) {
@@ -119,9 +127,12 @@ func TestDeliverUpdatesFireAtOnSendFailure(t *testing.T) {
 	if _, ok := store.markSent[notifID]; ok {
 		t.Fatal("notification should NOT be marked as sent")
 	}
-	// Check that UpdateFireAt was called with a future time (backoff).
+	// Check that ScheduleRetry was called with a future time (backoff).
 	if len(store.updateFa) == 0 {
-		t.Fatal("expected UpdateFireAt to be called")
+		t.Fatal("expected ScheduleRetry to be called")
+	}
+	if store.retries[notifID] != 1 {
+		t.Fatalf("persisted attempts = %d, want 1", store.retries[notifID])
 	}
 	nextFire := store.updateFa[notifID]
 	if nextFire.Before(time.Now().UTC()) {
@@ -158,7 +169,7 @@ func TestDeliverBacksOffOnTransientReminderLookupError(t *testing.T) {
 	}
 	nextFire, ok := store.updateFa[notifID]
 	if !ok {
-		t.Fatal("expected UpdateFireAt to be called for backoff")
+		t.Fatal("expected ScheduleRetry to be called for backoff")
 	}
 	if !nextFire.After(time.Now().UTC()) {
 		t.Fatalf("expected a future fire_at, got %v", nextFire)
@@ -203,7 +214,7 @@ func TestDeliverMarksFailedAfterMaxAttempts(t *testing.T) {
 	w.deliver(context.Background(), notif)
 
 	if len(store.updateFa) > 0 {
-		t.Fatal("UpdateFireAt should NOT be called at max attempts")
+		t.Fatal("ScheduleRetry should NOT be called at max attempts")
 	}
 	attempts, ok := store.markFail[notifID]
 	if !ok {

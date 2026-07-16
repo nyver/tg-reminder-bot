@@ -41,6 +41,9 @@ func SafeClient(timeout time.Duration, proxyURL string) (*http.Client, error) {
 		default:
 			return nil, fmt.Errorf("unsupported proxy_url scheme %q (want http, https, socks5 or socks5h)", u.Scheme)
 		}
+		if u.Hostname() == "" {
+			return nil, fmt.Errorf("invalid proxy_url: host is required")
+		}
 		return &http.Client{
 			Timeout: timeout,
 			Transport: &http.Transport{
@@ -158,19 +161,27 @@ func isPrivateHost(host string) bool {
 	return isPrivateIP(ip)
 }
 
-// privateNets contains RFC-1918 + link-local + loopback ranges.
+// privateNets contains non-public address ranges that user-supplied URLs must
+// never reach, including carrier-grade NAT and reserved/multicast networks.
 var privateNets []*net.IPNet
 
 func init() {
 	for _, cidr := range []string{
+		"0.0.0.0/8",      // unspecified/current network
 		"127.0.0.0/8",    // loopback
 		"10.0.0.0/8",     // RFC-1918 class A
+		"100.64.0.0/10",  // carrier-grade NAT
 		"172.16.0.0/12",  // RFC-1918 class B (172.16-31)
 		"192.168.0.0/16", // RFC-1918 class C
 		"169.254.0.0/16", // link-local / cloud metadata (169.254.169.254)
+		"198.18.0.0/15",  // benchmark networks
+		"224.0.0.0/4",    // multicast
+		"240.0.0.0/4",    // reserved
+		"::/128",         // IPv6 unspecified
 		"::1/128",        // IPv6 loopback
 		"fc00::/7",       // IPv6 ULA
 		"fe80::/10",      // IPv6 link-local
+		"ff00::/8",       // IPv6 multicast
 	} {
 		_, network, _ := net.ParseCIDR(cidr)
 		if network != nil {

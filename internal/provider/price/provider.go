@@ -21,7 +21,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/chromedp/cdproto/cdp"
 	"github.com/chromedp/cdproto/emulation"
+	"github.com/chromedp/cdproto/fetch"
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/chromedp"
@@ -56,6 +58,9 @@ type Provider struct {
 func New(userAgent string, timeout time.Duration, headless bool, proxyURL string, log *slog.Logger) *Provider {
 	if timeout <= 0 {
 		timeout = 15 * time.Second
+	}
+	if log == nil {
+		log = slog.Default()
 	}
 	jar, _ := cookiejar.New(nil)
 
@@ -183,14 +188,19 @@ const stealthScript = `(function(){
 
 // fetchPageHeadless opens a new browser tab, navigates to rawURL, and returns
 // the full page HTML. The Chrome process is shared across calls (started once).
-func (p *Provider) fetchPageHeadless(rawURL string) ([]byte, error) {
+func (p *Provider) fetchPageHeadless(ctx context.Context, rawURL string) ([]byte, error) {
 	p.initAlloc()
 
-	// Each request gets its own tab; the underlying Chrome process is shared.
+	// Each request gets an isolated browser context. The underlying Chrome
+	// process is shared for performance, but cookies and other site data must
+	// never leak between different users' product checks.
 	tabCtx, cancel := chromedp.NewContext(p.allocCtx,
+		chromedp.WithNewBrowserContext(),
 		chromedp.WithLogf(func(string, ...interface{}) {}), // suppress CDP noise
 	)
 	defer cancel()
+	stopCancel := context.AfterFunc(ctx, cancel)
+	defer stopCancel()
 
 	// Headless mode needs extra time for WAF JS challenges (ServicePipe,
 	// Cloudflare, Qrator). Use at least 30s regardless of the configured
@@ -202,25 +212,30 @@ func (p *Provider) fetchPageHeadless(rawURL string) ([]byte, error) {
 	tabCtx, timeoutCancel := context.WithTimeout(tabCtx, headlessTimeout)
 	defer timeoutCancel()
 
-	p.log.Debug("price: headless fetch", "url", rawURL)
+	p.log.Debug("price: headless fetch", "url", safeLogURL(rawURL))
 
-	// Capture real HTTP request/response headers via CDP Network domain.
+	// Log navigation metadata only. Headers, cookies, query strings and page
+	// snippets may contain credentials or personal data and are never logged.
+	var validatedHosts sync.Map
 	chromedp.ListenTarget(tabCtx, func(ev interface{}) {
 		switch e := ev.(type) {
+		case *fetch.EventRequestPaused:
+			// Listener callbacks must not block the target's event loop. Validate
+			// every browser request asynchronously before allowing Chrome to
+			// resolve/connect, including redirects and page subresources.
+			go p.continueSafeBrowserRequest(tabCtx, e, &validatedHosts)
 		case *network.EventRequestWillBeSent:
 			if e.Type == network.ResourceTypeDocument {
 				p.log.Debug("price: headless request",
-					"url", e.Request.URL,
+					"url", safeLogURL(e.Request.URL),
 					"method", e.Request.Method,
-					"req_headers", e.Request.Headers,
 				)
 			}
 		case *network.EventResponseReceived:
 			if e.Type == network.ResourceTypeDocument {
-				p.log.Debug("price: headless response headers",
-					"url", e.Response.URL,
+				p.log.Debug("price: headless response",
+					"url", safeLogURL(e.Response.URL),
 					"status", e.Response.Status,
-					"resp_headers", e.Response.Headers,
 				)
 			}
 		}
@@ -229,6 +244,10 @@ func (p *Provider) fetchPageHeadless(rawURL string) ([]byte, error) {
 	var html string
 	var resolvedChallenge bool
 	if err := chromedp.Run(tabCtx,
+		// Intercept every request before it reaches the network. The ordinary
+		// HTTP transport has a safe DialContext, but Chromium has its own network
+		// stack and needs this equivalent SSRF guard.
+		fetch.Enable(),
 		// Enable CDP Network domain so events above are delivered.
 		chromedp.ActionFunc(func(ctx context.Context) error {
 			return network.Enable().Do(ctx)
@@ -355,18 +374,63 @@ func (p *Provider) fetchPageHeadless(rawURL string) ([]byte, error) {
 		return nil, fmt.Errorf("headless fetch: %w", err)
 	}
 
-	const bodySnippetLen = 512
-	snippet := html
-	if len(snippet) > bodySnippetLen {
-		snippet = snippet[:bodySnippetLen]
-	}
 	p.log.Debug("price: headless page loaded",
-		"url", rawURL,
+		"url", safeLogURL(rawURL),
 		"page_title", extractPageTitle([]byte(html)),
 		"html_len", len(html),
-		"html_snippet", snippet,
 	)
 	return []byte(html), nil
+}
+
+func (p *Provider) continueSafeBrowserRequest(ctx context.Context, event *fetch.EventRequestPaused, validatedHosts *sync.Map) {
+	target := chromedp.FromContext(ctx).Target
+	if target == nil {
+		return
+	}
+	commandCtx := cdp.WithExecutor(ctx, target)
+	if err := p.validateBrowserRequestCached(ctx, event.Request.URL, validatedHosts); err != nil {
+		p.log.Warn("price: blocked unsafe browser request",
+			"url", safeLogURL(event.Request.URL),
+			"err", err,
+		)
+		_ = fetch.FailRequest(event.RequestID, network.ErrorReasonBlockedByClient).Do(commandCtx)
+		return
+	}
+	_ = fetch.ContinueRequest(event.RequestID).Do(commandCtx)
+}
+
+func (p *Provider) validateBrowserRequestCached(ctx context.Context, raw string, validatedHosts *sync.Map) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return err
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return p.validateBrowserRequest(ctx, raw)
+	}
+	host := strings.ToLower(u.Hostname())
+	if _, ok := validatedHosts.Load(host); ok {
+		return nil
+	}
+	if err := p.validateURL(ctx, raw); err != nil {
+		return err
+	}
+	validatedHosts.Store(host, struct{}{})
+	return nil
+}
+
+func (p *Provider) validateBrowserRequest(ctx context.Context, raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return err
+	}
+	switch u.Scheme {
+	case "http", "https":
+		return p.validateURL(ctx, raw)
+	case "data", "blob", "about":
+		return nil
+	default:
+		return fmt.Errorf("unsupported browser request scheme %q", u.Scheme)
+	}
 }
 
 func (p *Provider) Type() string { return providerType }
@@ -391,7 +455,7 @@ func (p *Provider) Sample(ctx context.Context, q provider.Query) (provider.Measu
 	kopecks, currency, pageTitle, found := extractPrice(body)
 	if !found || kopecks <= 0 {
 		logArgs := []any{
-			"url", rawURL,
+			"url", safeLogURL(rawURL),
 			"headless", p.headless,
 			"page_title", extractPageTitle(body),
 			"body_len", len(body),
@@ -408,7 +472,7 @@ func (p *Provider) Sample(ctx context.Context, q provider.Query) (provider.Measu
 		title = pageTitle
 	}
 
-	p.log.Info("price: sampled", "url", rawURL, "kopecks", kopecks, "currency", currency, "title", title, "headless", p.headless)
+	p.log.Info("price: sampled", "url", safeLogURL(rawURL), "kopecks", kopecks, "currency", currency, "title", title, "headless", p.headless)
 	return provider.Measurement{
 		Value:     kopecks,
 		Currency:  currency,
@@ -423,7 +487,7 @@ func (p *Provider) Sample(ctx context.Context, q provider.Query) (provider.Measu
 // Returns (nil, status, err) for other 4xx/5xx errors.
 func (p *Provider) fetchBody(ctx context.Context, rawURL string) ([]byte, int, error) {
 	if p.headless {
-		body, err := p.fetchPageHeadless(rawURL)
+		body, err := p.fetchPageHeadless(ctx, rawURL)
 		return body, 0, err
 	}
 
@@ -444,7 +508,7 @@ func (p *Provider) fetchBody(ctx context.Context, rawURL string) ([]byte, int, e
 		return nil, status, nil
 	}
 	if status == http.StatusUnauthorized || status == http.StatusForbidden {
-		p.log.Warn("price: access denied, will retry next tick", "url", rawURL, "status", status)
+		p.log.Warn("price: access denied, will retry next tick", "url", safeLogURL(rawURL), "status", status)
 		return nil, status, nil
 	}
 	if status >= 400 {
@@ -481,9 +545,8 @@ func (p *Provider) fetchPage(ctx context.Context, rawURL, referer string) ([]byt
 	}
 
 	p.log.Debug("price: request",
-		"url", rawURL,
-		"referer", referer,
-		"req_headers", req.Header,
+		"url", safeLogURL(rawURL),
+		"referer", safeLogURL(referer),
 	)
 
 	var resp *http.Response
@@ -498,7 +561,7 @@ func (p *Provider) fetchPage(ctx context.Context, rawURL, referer string) ([]byt
 
 		delay := time.Duration(attempt) * retryBaseDelay
 		p.log.Warn("price: temporary network error, retrying",
-			"url", rawURL,
+			"url", safeLogURL(rawURL),
 			"attempt", attempt,
 			"retry_in_ms", delay.Milliseconds(),
 			"err", err,
@@ -514,19 +577,15 @@ func (p *Provider) fetchPage(ctx context.Context, rawURL, referer string) ([]byt
 	defer resp.Body.Close()
 
 	p.log.Debug("price: response",
-		"url", rawURL,
+		"url", safeLogURL(rawURL),
 		"status", resp.StatusCode,
-		"resp_headers", resp.Header,
 	)
 
 	if resp.StatusCode != http.StatusOK {
-		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
 		_, _ = io.Copy(io.Discard, resp.Body)
 		p.log.Debug("price fetch non-200",
 			"status", resp.StatusCode,
-			"url", rawURL,
-			"resp_headers", resp.Header,
-			"snippet", string(snippet),
+			"url", safeLogURL(rawURL),
 		)
 		return nil, resp.StatusCode, nil
 	}
@@ -864,19 +923,27 @@ func ParsePrice(s string) (int64, string, error) {
 	return kopecks, currency, nil
 }
 
-// privateNets contains RFC-1918 + link-local + loopback ranges checked by isPrivateHost.
+// privateNets contains non-public address ranges that user-supplied URLs must
+// never reach, including carrier-grade NAT and reserved/multicast networks.
 var privateNets []*net.IPNet
 
 func init() {
 	for _, cidr := range []string{
+		"0.0.0.0/8",      // unspecified/current network
 		"127.0.0.0/8",    // loopback
 		"10.0.0.0/8",     // RFC-1918 class A
+		"100.64.0.0/10",  // carrier-grade NAT
 		"172.16.0.0/12",  // RFC-1918 class B (172.16–31)
 		"192.168.0.0/16", // RFC-1918 class C
 		"169.254.0.0/16", // link-local / AWS metadata (169.254.169.254)
+		"198.18.0.0/15",  // benchmark networks
+		"224.0.0.0/4",    // multicast
+		"240.0.0.0/4",    // reserved
+		"::/128",         // IPv6 unspecified
 		"::1/128",        // IPv6 loopback
 		"fc00::/7",       // IPv6 ULA
 		"fe80::/10",      // IPv6 link-local
+		"ff00::/8",       // IPv6 multicast
 	} {
 		_, network, _ := net.ParseCIDR(cidr)
 		if network != nil {
@@ -894,6 +961,24 @@ func redactURL(raw string) string {
 	if _, hasPass := u.User.Password(); hasPass {
 		u.User = url.UserPassword(u.User.Username(), "***")
 	}
+	return u.String()
+}
+
+// safeLogURL removes user info, query parameters and fragments before a URL
+// is written to logs. Product links commonly carry session or referral
+// tokens, which must not become durable log data.
+func safeLogURL(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "[invalid URL]"
+	}
+	u.User = nil
+	u.RawQuery = ""
+	u.ForceQuery = false
+	u.Fragment = ""
 	return u.String()
 }
 

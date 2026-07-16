@@ -1045,6 +1045,9 @@ func (h *Handler) continueParsing(ctx context.Context, c tele.Context, userID in
 	}
 	if err := validateParseResult(result); err != nil {
 		h.log.Warn("invalid parse result", "err", err, "confidence", result.Confidence)
+		if errors.Is(err, errTravelUnsupported) {
+			return c.Send("Поиск билетов пока недоступен. Можно создать обычное напоминание о поездке или выбрать другой тип напоминания.")
+		}
 		return c.Send("Не удалось определить все параметры напоминания. Попробуйте переформулировать.")
 	}
 
@@ -1375,6 +1378,8 @@ const (
 	listReminderTitleLimit   = 240
 )
 
+var errTravelUnsupported = errors.New("travel reminders are not supported")
+
 func buildReminder(userID int64, rawText string, result *nlu.ParseResult, now time.Time, userTZ string) (*domain.Reminder, error) {
 	if err := validateParseResult(result); err != nil {
 		return nil, err
@@ -1517,12 +1522,7 @@ func validateParseResult(result *nlu.ParseResult) error {
 				return fmt.Errorf("TV reminder has no channel")
 			}
 		case "travel":
-			if result.Spec.Trigger != domain.TriggerDigest {
-				return fmt.Errorf("travel reminder requires digest trigger")
-			}
-			if result.Spec.Event.Params["origin"] == "" || result.Spec.Event.Params["destination"] == "" {
-				return fmt.Errorf("travel reminder requires origin and destination")
-			}
+			return errTravelUnsupported
 		case "rss":
 			if result.Spec.Trigger != domain.TriggerDigest {
 				return fmt.Errorf("rss reminder requires digest trigger")
@@ -1815,5 +1815,4 @@ const msgHelp = `*Что можно сделать*
 • «уведоми за 1 неделю до КВН на Первом»
 • «вот ссылка на товар — уведоми при снижении цены»
 • «вот ссылка — уведоми при снижении цены каждые 4 часа»
-• «каждый день в 9:00 — 5 дешёвых билетов СПб→Калининград на месяц вперёд»
 • «каждый день в 18:00 создай дайджест новостей на основе https://lenta.ru/rss»`

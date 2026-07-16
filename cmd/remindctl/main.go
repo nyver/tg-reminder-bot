@@ -57,7 +57,7 @@ func printUsage() {
 Команды:
   migrate up|down|status         — управление миграциями
   reminders list --user <id>     — список напоминаний пользователя
-  provider travel                — прогон travel-агрегатора (dry run)
+  provider travel                — проверка конфигурации (live-поиск пока недоступен)
     --from <город>
     --to <город>
     --modes air,rail
@@ -185,7 +185,7 @@ func runProvider(args []string) {
 
 	topOffers := scheduler.PickTopN(offers, *top)
 	if len(topOffers) == 0 {
-		fmt.Println("Предложения не найдены.")
+		fmt.Println("Travel providers are not implemented; no live offers are available.")
 		return
 	}
 	fmt.Printf("\nТоп-%d предложений:\n", *top)

@@ -425,7 +425,7 @@ func buildPrompt(text string, now time.Time) string {
   lead_time   "3h"  "24h" "168h"              (для anchor: часы; день=24h, неделя=168h)
   top_n       5                               (для digest)
   horizon_days 30                             (для digest/anchor)
-  event.type  tv_program|price|travel|rss     (для conditional)
+  event.type  tv_program|price|rss            (для conditional)
   event.title название                        (для tv_program/price)
   event.params {"url":"..."} и т.д. (для rss с несколькими лентами — через запятую: "url1,url2")
   confidence  0.0-1.0                         (обязательно)
@@ -441,7 +441,6 @@ func buildPrompt(text string, now time.Time) string {
 - «каждые 2 часа» при снижении цены → eval_cron="0 */2 * * *"
 - «каждые 30 минут» при снижении цены → eval_cron="*/30 * * * *"
 - «каждый час» / «раз в час» при снижении цены → eval_cron="0 * * * *"
-- «5 дешёвых билетов СПб→Калининград» → kind=conditional, trigger=digest, event.type=travel
 - «каждый день в 18:00 создай дайджест новостей на основе <URL>» → kind=conditional, trigger=digest, event.type=rss, event.params.url=<URL>, eval_cron="0 18 * * *"
 - «дайджест новостей по ленте <URL> топ 10 в 8 утра» → kind=conditional, trigger=digest, event.type=rss, event.params.url=<URL>, top_n=10, eval_cron="0 8 * * *"
 - «дайджест по лентам <URL1> и <URL2> в 9 утра» → kind=conditional, trigger=digest, event.type=rss, event.params.url="<URL1>,<URL2>" (несколько ссылок через запятую — один общий дайджест по всем лентам)
@@ -519,7 +518,7 @@ func mapToResult(resp *llmResponse) (*ParseResult, error) {
 			spec.Trigger = domain.TriggerThreshold
 		case "tv_program":
 			spec.Trigger = domain.TriggerAnchor
-		case "travel", "rss":
+		case "rss":
 			spec.Trigger = domain.TriggerDigest
 		}
 	}
@@ -531,8 +530,6 @@ func mapToResult(resp *llmResponse) (*ParseResult, error) {
 			spec.Event.Type = "price"
 		case domain.TriggerAnchor:
 			spec.Event.Type = "tv_program"
-		case domain.TriggerDigest:
-			spec.Event.Type = "travel"
 		}
 	}
 

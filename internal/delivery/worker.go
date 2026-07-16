@@ -23,7 +23,7 @@ type NotificationStore interface {
 	LeasePending(ctx context.Context, workerID string, limit int) ([]domain.ScheduledNotification, error)
 	MarkSent(ctx context.Context, id uuid.UUID) error
 	MarkFailed(ctx context.Context, id uuid.UUID, attempts int) error
-	UpdateFireAt(ctx context.Context, id uuid.UUID, fireAt time.Time) error
+	ScheduleRetry(ctx context.Context, id uuid.UUID, attempts int, fireAt time.Time) error
 }
 
 // ReminderStore is used to resolve UserID for delivery.
@@ -97,15 +97,33 @@ func (w *Worker) deliverSafe(ctx context.Context, n domain.ScheduledNotification
 				"panic", r,
 				"stack", string(debug.Stack()),
 			)
+			w.retry(ctx, n)
 		}
 	}()
 	w.deliver(ctx, n)
 }
 
+// retry persists both the next delivery time and the incremented attempt
+// count. Keeping these values in one store operation prevents a notification
+// from retrying forever with attempts=0 and makes releasing its lease atomic.
+func (w *Worker) retry(ctx context.Context, n domain.ScheduledNotification) {
+	attempts := n.Attempts + 1
+	observability.NotificationsFailedTotal.Inc()
+	if attempts >= maxAttempts {
+		if err := w.notifications.MarkFailed(ctx, n.ID, attempts); err != nil {
+			w.log.Error("mark notification failed", "notification_id", n.ID, "err", err)
+		}
+		return
+	}
+	nextFire := time.Now().UTC().Add(backoffDuration(attempts))
+	if err := w.notifications.ScheduleRetry(ctx, n.ID, attempts, nextFire); err != nil {
+		w.log.Error("schedule notification retry", "notification_id", n.ID, "err", err)
+	}
+}
+
 func (w *Worker) deliver(ctx context.Context, n domain.ScheduledNotification) {
 	rem, err := w.reminders.Get(ctx, n.ReminderID)
 	if err != nil {
-		attempts := n.Attempts + 1
 		if errors.Is(err, domain.ErrNotFound) {
 			// Reminder deleted — no point retrying.
 			w.log.Warn("reminder lookup failed, reminder gone", "id", n.ReminderID, "err", err)
@@ -115,36 +133,14 @@ func (w *Worker) deliver(ctx context.Context, n domain.ScheduledNotification) {
 		// Transient error (e.g. DB hiccup): back off like a send failure instead
 		// of leaving fire_at untouched, which would let LeasePending re-lease
 		// this row on every tick in a tight busy-retry loop.
-		w.log.Warn("reminder lookup failed, will retry", "id", n.ReminderID, "attempt", attempts, "err", err)
-		observability.NotificationsFailedTotal.Inc()
-		if attempts >= maxAttempts {
-			_ = w.notifications.MarkFailed(ctx, n.ID, attempts)
-			return
-		}
-		delay := backoffDuration(attempts)
-		nextFire := time.Now().UTC().Add(delay)
-		if err := w.notifications.UpdateFireAt(ctx, n.ID, nextFire); err != nil {
-			w.log.Error("update fire_at failed", "notification_id", n.ID, "err", err)
-		}
+		w.log.Warn("reminder lookup failed, will retry", "id", n.ReminderID, "attempt", n.Attempts+1, "err", err)
+		w.retry(ctx, n)
 		return
 	}
 
 	if err := w.sender.Send(ctx, rem.UserID, n.Text); err != nil {
-		attempts := n.Attempts + 1
-		w.log.Warn("send failed", "notification_id", n.ID, "attempt", attempts, "err", err)
-		observability.NotificationsFailedTotal.Inc()
-
-		// Apply exponential backoff by scheduling the next delivery attempt.
-		// After maxAttempts, mark as permanently failed.
-		if attempts >= maxAttempts {
-			_ = w.notifications.MarkFailed(ctx, n.ID, attempts)
-			return
-		}
-		delay := backoffDuration(attempts)
-		nextFire := time.Now().UTC().Add(delay)
-		if err := w.notifications.UpdateFireAt(ctx, n.ID, nextFire); err != nil {
-			w.log.Error("update fire_at failed", "notification_id", n.ID, "err", err)
-		}
+		w.log.Warn("send failed", "notification_id", n.ID, "attempt", n.Attempts+1, "err", err)
+		w.retry(ctx, n)
 		return
 	}
 

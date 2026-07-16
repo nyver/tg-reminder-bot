@@ -34,6 +34,26 @@ func TestLoadYAMLUsesSQLiteDefaults(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsInvalidProxyURLs(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		apply func(*Config)
+	}{
+		{"price scheme", func(c *Config) { c.Providers.Price.ProxyURL = "file:///tmp/socket" }},
+		{"price host", func(c *Config) { c.Providers.Price.ProxyURL = "http://" }},
+		{"rss scheme", func(c *Config) { c.Providers.RSS.ProxyURL = "ftp://proxy.example" }},
+		{"rss host", func(c *Config) { c.Providers.RSS.ProxyURL = "socks5://" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := defaults()
+			tc.apply(cfg)
+			if err := cfg.Validate(); err == nil {
+				t.Fatal("expected validation error")
+			}
+		})
+	}
+}
+
 func TestDatabaseURLHasHighestPrecedence(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {

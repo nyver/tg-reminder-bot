@@ -80,20 +80,21 @@ providers:
     #   proxy_url: socks5://user:pass@proxy.example.com:1080
     # Empty value — direct connection without a proxy.
     proxy_url: ""
-    # Default poll schedule for a product page (5-field cron, UTC).
+    # Default poll schedule for a product page (5-field cron, user's timezone).
     # Applied when the user did not specify an interval in the reminder text.
     # Examples:
     #   0 * * * *     — every hour            (recommended)
     #   0 */4 * * *   — every 4 hours
     #   0 */12 * * *  — twice a day
-    #   0 9 * * *     — daily at 09:00 UTC
-    poll_cron: "0 9 * * *"
+    #   0 9 * * *     — daily at 09:00 in the user's timezone
+    poll_cron: "0 * * * *"
 
   travel:
-    # An empty key disables the corresponding ticket source.
+    # Reserved for future live ticket integrations. Travel reminders are
+    # currently disabled; these keys do not enable live searches yet.
     air_api_key: ""
     rail_api_key: ""
-    # Timeout for a request to the offers source.
+    # Reserved request timeout for future offer sources.
     timeout: 10s
     # Maximum search depth from the current date.
     max_horizon_days: 180

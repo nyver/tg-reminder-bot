@@ -72,7 +72,9 @@ func main() {
 			Timeout: cfg.Providers.TV.Timeout,
 		}, log))
 	}
-	registry.RegisterMetric(price.New(cfg.Providers.Price.UserAgent, cfg.Providers.Price.Timeout, cfg.Providers.Price.Headless, cfg.Providers.Price.ProxyURL, log))
+	priceProber := price.New(cfg.Providers.Price.UserAgent, cfg.Providers.Price.Timeout, cfg.Providers.Price.Headless, cfg.Providers.Price.ProxyURL, log)
+	defer priceProber.Close()
+	registry.RegisterMetric(priceProber)
 
 	airP := travel.NewAirProvider(cfg.Providers.Travel.AirAPIKey, log)
 	railP := travel.NewRailProvider(cfg.Providers.Travel.RailAPIKey, log)

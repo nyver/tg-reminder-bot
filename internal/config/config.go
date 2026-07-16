@@ -3,6 +3,7 @@ package config
 import (
 	"bytes"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -299,6 +300,9 @@ func (cfg *Config) Validate() error {
 	if cfg.Providers.Price.Timeout <= 0 {
 		return fmt.Errorf("config: providers.price.timeout must be positive")
 	}
+	if err := validateProxyURL(cfg.Providers.Price.ProxyURL); err != nil {
+		return fmt.Errorf("config: providers.price.proxy_url: %w", err)
+	}
 	if strings.TrimSpace(cfg.Providers.Price.PollCron) == "" {
 		return fmt.Errorf("config: providers.price.poll_cron is required")
 	}
@@ -314,6 +318,28 @@ func (cfg *Config) Validate() error {
 	}
 	if cfg.Providers.RSS.Timeout <= 0 {
 		return fmt.Errorf("config: providers.rss.timeout must be positive")
+	}
+	if err := validateProxyURL(cfg.Providers.RSS.ProxyURL); err != nil {
+		return fmt.Errorf("config: providers.rss.proxy_url: %w", err)
+	}
+	return nil
+}
+
+func validateProxyURL(raw string) error {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("invalid URL: %w", err)
+	}
+	switch u.Scheme {
+	case "http", "https", "socks5", "socks5h":
+	default:
+		return fmt.Errorf("unsupported scheme %q", u.Scheme)
+	}
+	if u.Hostname() == "" {
+		return fmt.Errorf("host is required")
 	}
 	return nil
 }

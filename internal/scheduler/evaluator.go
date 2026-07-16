@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -332,11 +333,11 @@ func (e *Evaluator) evaluateNewsDigest(ctx context.Context, r domain.Reminder) (
 		Params: r.Spec.Event.Params,
 	})
 	if err != nil {
-		e.log.Warn("rss fetch failed, will retry next tick",
+		e.log.Warn("rss fetch failed",
 			"reminder_id", r.ID,
 			"err", err,
 		)
-		return nil, nil
+		return nil, fmt.Errorf("rss fetch: %w", err)
 	}
 
 	topN := orDefault(r.Spec.TopN, 10)
@@ -601,6 +602,10 @@ const telegramMaxMessageLen = 3500
 // still blow the message-length budget.
 const digestSummaryMaxLen = 500
 
+// digestTitleMaxLen prevents one malicious or malformed feed item from
+// exceeding Telegram's message limit by itself.
+const digestTitleMaxLen = 300
+
 // renderNewsDigest formats an RSS/Atom digest as MarkdownV2 with each item's
 // title as a clickable link (see MarkdownV2Prefix), instead of showing the
 // raw URL on its own line. All feed-controlled text (title, summary) is
@@ -622,11 +627,13 @@ func renderNewsDigest(spec domain.Spec, items []provider.NewsItem) []string {
 	for i, it := range items {
 		var b strings.Builder
 		b.WriteString(fmt.Sprintf("%d\\. ", i+1))
+		itemTitle := clampRunes(it.Title, digestTitleMaxLen)
+		link := safeDigestLink(it.Link)
 		switch {
-		case it.Link != "":
-			b.WriteString(fmt.Sprintf("*[%s](%s)*", mdv2Escape(it.Title), mdv2EscapeURL(it.Link)))
+		case link != "":
+			b.WriteString(fmt.Sprintf("*[%s](%s)*", mdv2Escape(itemTitle), mdv2EscapeURL(link)))
 		default:
-			b.WriteString("*" + mdv2Escape(it.Title) + "*")
+			b.WriteString("*" + mdv2Escape(itemTitle) + "*")
 		}
 		if !it.PublishedAt.IsZero() {
 			b.WriteString(" · _" + mdv2Escape(it.PublishedAt.Format("02.01 15:04")) + "_")
@@ -683,11 +690,15 @@ func renderNewsDigest(spec domain.Spec, items []provider.NewsItem) []string {
 }
 
 func clampDigestSummary(s string) string {
+	return clampRunes(s, digestSummaryMaxLen)
+}
+
+func clampRunes(s string, maxLen int) string {
 	r := []rune(s)
-	if len(r) <= digestSummaryMaxLen {
+	if len(r) <= maxLen {
 		return s
 	}
-	return string(r[:digestSummaryMaxLen]) + "…"
+	return string(r[:maxLen]) + "…"
 }
 
 // mdv2Replacer escapes all MarkdownV2 special characters.
@@ -706,6 +717,14 @@ func mdv2Escape(s string) string { return mdv2Replacer.Replace(s) }
 func mdv2EscapeURL(s string) string {
 	s = strings.ReplaceAll(s, `\`, `\\`)
 	return strings.ReplaceAll(s, `)`, `\)`)
+}
+
+func safeDigestLink(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
+		return ""
+	}
+	return u.String()
 }
 
 func formatPrice(kopecks int64, currency string) string {

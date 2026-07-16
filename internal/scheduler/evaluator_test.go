@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -337,8 +338,8 @@ func TestNewsDigestProviderErrorRetriesNextTick(t *testing.T) {
 	evaluator := NewEvaluator(registry, &fakeHistory{}, clock.NewFake(now), 180, nil)
 
 	planned, err := evaluator.Evaluate(context.Background(), newsDigestReminder())
-	if err != nil {
-		t.Fatalf("expected nil error on transient provider failure, got: %v", err)
+	if err == nil {
+		t.Fatal("expected provider error so the watcher schedules a retry")
 	}
 	if len(planned) != 0 {
 		t.Fatalf("expected no notifications on provider error, got %+v", planned)
@@ -545,5 +546,50 @@ func TestNewsDigestUnregisteredProviderErrors(t *testing.T) {
 	_, err := evaluator.Evaluate(context.Background(), newsDigestReminder())
 	if err == nil {
 		t.Fatal("expected error when no news provider is registered")
+	}
+}
+
+func TestNewsDigestFetchFailureReturnsErrorForRetry(t *testing.T) {
+	now := time.Date(2026, 7, 16, 9, 0, 0, 0, time.UTC)
+	registry := provider.NewRegistry()
+	registry.RegisterNews(newsProviderFunc(func(context.Context, provider.Query) ([]provider.NewsItem, error) {
+		return nil, errors.New("feed unavailable")
+	}))
+	evaluator := NewEvaluator(registry, &fakeHistory{}, clock.NewFake(now), 180, nil)
+
+	planned, err := evaluator.Evaluate(context.Background(), newsDigestReminder())
+	if err == nil {
+		t.Fatal("expected fetch error so the watcher schedules a retry")
+	}
+	if len(planned) != 0 {
+		t.Fatalf("planned = %+v, want none", planned)
+	}
+}
+
+func TestRenderNewsDigestRejectsUnsafeLinks(t *testing.T) {
+	items := []provider.NewsItem{{Title: "Untrusted", Link: "javascript:alert(1)"}}
+	texts := renderNewsDigest(domain.Spec{}, items)
+	if len(texts) != 1 {
+		t.Fatalf("expected one message, got %d", len(texts))
+	}
+	if strings.Contains(texts[0], "](javascript:") {
+		t.Fatalf("unsafe URL rendered as a link: %s", texts[0])
+	}
+	if !strings.Contains(texts[0], "*Untrusted*") {
+		t.Fatalf("title should still be rendered as plain bold text: %s", texts[0])
+	}
+}
+
+func TestRenderNewsDigestClampsOversizedTitle(t *testing.T) {
+	items := []provider.NewsItem{{
+		Title: strings.Repeat("длинный заголовок ", 500),
+		Link:  "https://example.com/article",
+	}}
+	texts := renderNewsDigest(domain.Spec{}, items)
+	if len(texts) != 1 {
+		t.Fatalf("expected one message, got %d", len(texts))
+	}
+	if len([]rune(texts[0])) > telegramMaxMessageLen {
+		t.Fatalf("message has %d runes, limit %d", len([]rune(texts[0])), telegramMaxMessageLen)
 	}
 }

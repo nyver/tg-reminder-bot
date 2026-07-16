@@ -121,3 +121,54 @@ func TestValidateURLRejectsPrivateIPLiteral(t *testing.T) {
 		t.Fatal("expected private IP literal to be rejected")
 	}
 }
+
+func TestValidateURLRejectsNonPublicNetworks(t *testing.T) {
+	p := &Provider{lookupIP: publicLookup}
+	for _, rawURL := range []string{
+		"http://0.1.2.3/product",
+		"http://100.64.0.1/product",
+		"http://198.18.0.1/product",
+		"http://224.0.0.1/product",
+		"http://[ff02::1]/product",
+	} {
+		t.Run(rawURL, func(t *testing.T) {
+			if err := p.validateURL(context.Background(), rawURL); err == nil {
+				t.Fatalf("expected %s to be rejected", rawURL)
+			}
+		})
+	}
+}
+
+func TestSafeLogURLRemovesCredentialsAndTokens(t *testing.T) {
+	got := safeLogURL("https://user:password@shop.example/product?token=secret#account")
+	if got != "https://shop.example/product" {
+		t.Fatalf("safeLogURL() = %q", got)
+	}
+	if got := safeLogURL("://bad"); got != "[invalid URL]" {
+		t.Fatalf("invalid URL = %q", got)
+	}
+}
+
+func TestValidateBrowserRequest(t *testing.T) {
+	p := &Provider{lookupIP: publicLookup}
+	for _, rawURL := range []string{
+		"https://shop.example/image.png",
+		"data:image/png;base64,AA==",
+		"blob:https://shop.example/id",
+		"about:blank",
+	} {
+		if err := p.validateBrowserRequest(context.Background(), rawURL); err != nil {
+			t.Errorf("safe request %q rejected: %v", rawURL, err)
+		}
+	}
+
+	p.lookupIP = func(context.Context, string) ([]net.IPAddr, error) {
+		return []net.IPAddr{{IP: net.ParseIP("169.254.169.254")}}, nil
+	}
+	if err := p.validateBrowserRequest(context.Background(), "http://metadata.example/latest"); err == nil {
+		t.Fatal("expected private browser request to be rejected")
+	}
+	if err := p.validateBrowserRequest(context.Background(), "file:///etc/passwd"); err == nil {
+		t.Fatal("expected file request to be rejected")
+	}
+}

@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -64,7 +65,7 @@ func TestBuildConditionalReminderSchedulesImmediateEvaluation(t *testing.T) {
 	}
 }
 
-func TestBuildTravelDigestReminder(t *testing.T) {
+func TestBuildTravelDigestReminderIsRejected(t *testing.T) {
 	now := time.Date(2026, 6, 21, 17, 30, 0, 0, time.UTC)
 	result := &nlu.ParseResult{
 		Kind: domain.KindConditional,
@@ -85,21 +86,8 @@ func TestBuildTravelDigestReminder(t *testing.T) {
 		EvalCron:   "0 9 * * *",
 	}
 
-	rem, err := buildReminder(1, "raw", result, now, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if rem.Kind != domain.KindConditional || rem.EvalCron != "0 9 * * *" {
-		t.Fatalf("unexpected reminder: %+v", rem)
-	}
-	if rem.NextEvalAt == nil {
-		t.Fatal("expected NextEvalAt to be set")
-	}
-	if !rem.NextEvalAt.After(now) {
-		t.Fatalf("NextEvalAt = %v, want after creation time %v", rem.NextEvalAt, now)
-	}
-	if got := rem.NextEvalAt.In(time.FixedZone("MSK", 3*60*60)).Format("15:04"); got != "09:00" {
-		t.Fatalf("NextEvalAt local time = %s, want 09:00", got)
+	if _, err := buildReminder(1, "raw", result, now, ""); !errors.Is(err, errTravelUnsupported) {
+		t.Fatalf("buildReminder() error = %v, want errTravelUnsupported", err)
 	}
 }
 
