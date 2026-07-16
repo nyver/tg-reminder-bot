@@ -48,9 +48,15 @@ func (m *mockNotifStore) UpdateFireAt(ctx context.Context, id uuid.UUID, fireAt 
 	return nil
 }
 
-type mockReminderStore struct{ rem *domain.Reminder }
+type mockReminderStore struct {
+	rem *domain.Reminder
+	err error
+}
 
 func (m *mockReminderStore) Get(ctx context.Context, id uuid.UUID) (*domain.Reminder, error) {
+	if m.err != nil {
+		return nil, m.err
+	}
 	return m.rem, nil
 }
 
@@ -58,6 +64,27 @@ type mockSender struct{ err error }
 
 func (m *mockSender) Send(ctx context.Context, userID int64, text string) error {
 	return m.err
+}
+
+type panicSender struct{}
+
+func (panicSender) Send(ctx context.Context, userID int64, text string) error {
+	panic("boom")
+}
+
+// TestDeliverSafeRecoversPanic guards against a regression where a panic
+// delivering a single notification (e.g. a sender bug) would crash the whole
+// worker process and halt delivery for every other user's notifications.
+func TestDeliverSafeRecoversPanic(t *testing.T) {
+	remID := uuid.New()
+	notifID := uuid.New()
+	notif := domain.ScheduledNotification{ID: notifID, ReminderID: remID, FireAt: time.Now().UTC()}
+
+	store := &mockNotifStore{lease: []domain.ScheduledNotification{notif}}
+	remStore := &mockReminderStore{rem: &domain.Reminder{ID: remID, UserID: 123}}
+
+	w := NewWorker(store, remStore, panicSender{}, "test", time.Second, testLog)
+	w.deliverSafe(context.Background(), notif) // must not panic
 }
 
 func TestDeliverSendsOnSuccess(t *testing.T) {
@@ -103,6 +130,63 @@ func TestDeliverUpdatesFireAtOnSendFailure(t *testing.T) {
 	// Backoff should be 2^1 * 5 = 10 seconds for attempt 1.
 	if nextFire.Before(time.Now().UTC().Add(9*time.Second)) || nextFire.After(time.Now().UTC().Add(20*time.Second)) {
 		t.Fatalf("unexpected backoff: %v", nextFire.Sub(time.Now().UTC()))
+	}
+}
+
+// TestDeliverBacksOffOnTransientReminderLookupError guards against a
+// regression where a transient reminder-lookup error (e.g. a DB hiccup, as
+// opposed to domain.ErrNotFound) went straight to MarkFailed without
+// advancing fire_at. Because MarkFailed leaves fire_at untouched while
+// attempts < maxAttempts, the notification stayed 'pending' with a past
+// fire_at and LeasePending would re-lease it on every subsequent tick — a
+// tight busy-retry loop instead of the exponential backoff used for send
+// failures.
+func TestDeliverBacksOffOnTransientReminderLookupError(t *testing.T) {
+	remID := uuid.New()
+	notifID := uuid.New()
+	notif := domain.ScheduledNotification{ID: notifID, ReminderID: remID, FireAt: time.Now().UTC(), Attempts: 0}
+
+	store := &mockNotifStore{lease: []domain.ScheduledNotification{notif}}
+	remStore := &mockReminderStore{err: errors.New("db hiccup")}
+	sender := &mockSender{}
+
+	w := NewWorker(store, remStore, sender, "test", time.Second, testLog)
+	w.deliver(context.Background(), notif)
+
+	if _, ok := store.markFail[notifID]; ok {
+		t.Fatal("a transient lookup error should back off, not mark the notification permanently failed")
+	}
+	nextFire, ok := store.updateFa[notifID]
+	if !ok {
+		t.Fatal("expected UpdateFireAt to be called for backoff")
+	}
+	if !nextFire.After(time.Now().UTC()) {
+		t.Fatalf("expected a future fire_at, got %v", nextFire)
+	}
+}
+
+// TestDeliverDropsNotificationWhenReminderDeleted verifies that a
+// domain.ErrNotFound reminder lookup (the reminder was deleted) still marks
+// the notification permanently failed immediately, since retrying can never
+// succeed.
+func TestDeliverDropsNotificationWhenReminderDeleted(t *testing.T) {
+	remID := uuid.New()
+	notifID := uuid.New()
+	notif := domain.ScheduledNotification{ID: notifID, ReminderID: remID, FireAt: time.Now().UTC(), Attempts: 0}
+
+	store := &mockNotifStore{lease: []domain.ScheduledNotification{notif}}
+	remStore := &mockReminderStore{err: domain.ErrNotFound}
+	sender := &mockSender{}
+
+	w := NewWorker(store, remStore, sender, "test", time.Second, testLog)
+	w.deliver(context.Background(), notif)
+
+	if len(store.updateFa) > 0 {
+		t.Fatal("a deleted reminder should not be retried via backoff")
+	}
+	attempts, ok := store.markFail[notifID]
+	if !ok || attempts < maxAttempts {
+		t.Fatalf("expected notification marked failed at maxAttempts, got attempts=%d ok=%v", attempts, ok)
 	}
 }
 

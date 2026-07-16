@@ -8,6 +8,41 @@ import (
 	"time"
 )
 
+func TestInClauseZeroDoesNotPanic(t *testing.T) {
+	pg := &DB{Dialect: "postgres"}
+	if got := pg.InClause(2, 0); got != "IN (NULL)" {
+		t.Fatalf("postgres InClause(2,0) = %q, want %q", got, "IN (NULL)")
+	}
+	sqlite := &DB{Dialect: "sqlite"}
+	if got := sqlite.InClause(2, 0); got != "IN (NULL)" {
+		t.Fatalf("sqlite InClause(2,0) = %q, want %q", got, "IN (NULL)")
+	}
+}
+
+func TestInClauseNonZero(t *testing.T) {
+	pg := &DB{Dialect: "postgres"}
+	if got := pg.InClause(2, 3); got != "IN ($2,$3,$4)" {
+		t.Fatalf("postgres InClause(2,3) = %q", got)
+	}
+	sqlite := &DB{Dialect: "sqlite"}
+	if got := sqlite.InClause(1, 3); got != "IN (?,?,?)" {
+		t.Fatalf("sqlite InClause(1,3) = %q", got)
+	}
+}
+
+func TestParseUUIDReturnsErrorOnCorruptValue(t *testing.T) {
+	if _, err := parseUUID("not-a-uuid"); err == nil {
+		t.Fatal("expected an error for a corrupt UUID column value, got nil")
+	}
+	id, err := parseUUID("123e4567-e89b-12d3-a456-426614174000")
+	if err != nil {
+		t.Fatalf("unexpected error for a valid UUID: %v", err)
+	}
+	if id.String() != "123e4567-e89b-12d3-a456-426614174000" {
+		t.Fatalf("parseUUID roundtrip = %v", id)
+	}
+}
+
 func TestNewSQLiteWaitsForStartupLock(t *testing.T) {
 	dsn := filepath.Join(t.TempDir(), "locked.db")
 	locker, err := sql.Open("sqlite", dsn)

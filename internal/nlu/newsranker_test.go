@@ -89,7 +89,7 @@ func TestNewsRankerOpenRouterFallbackOnMalformedJSON(t *testing.T) {
 	}))
 	defer server.Close()
 
-	ranker, err := NewConfiguredNewsRanker("openrouter", "test-key", primaryModel, server.URL, []string{fallbackModel}, time.Second, time.Second, 1024)
+	ranker, err := NewConfiguredNewsRanker("openrouter", "test-key", primaryModel, server.URL, []string{fallbackModel}, time.Second, 1024)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -281,7 +281,7 @@ func TestNewsRankerErrorsWhenAllLinksHallucinated(t *testing.T) {
 }
 
 func TestConfiguredNewsRankerRejectsUnknownProvider(t *testing.T) {
-	if _, err := NewConfiguredNewsRanker("unknown", "", "", "", nil, 0, 0, 0); err == nil {
+	if _, err := NewConfiguredNewsRanker("unknown", "", "", "", nil, 0, 0); err == nil {
 		t.Fatal("expected an error")
 	}
 }

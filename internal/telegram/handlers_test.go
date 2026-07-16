@@ -573,8 +573,10 @@ func TestConfirmationDecision(t *testing.T) {
 	}{
 		{"да", confirmDecisionYes},
 		{" Да! ", confirmDecisionYes},
+		{"да?", confirmDecisionYes},
 		{"создать", confirmDecisionYes},
 		{"нет", confirmDecisionNo},
+		{"нет?", confirmDecisionNo},
 		{"исправить", confirmDecisionNo},
 		{"не понял", confirmDecisionUnknown},
 	}
@@ -582,6 +584,17 @@ func TestConfirmationDecision(t *testing.T) {
 		if got := confirmationDecision(tc.text); got != tc.want {
 			t.Errorf("confirmationDecision(%q) = %v, want %v", tc.text, got, tc.want)
 		}
+	}
+}
+
+func TestEscapeMarkdownEscapesBackslash(t *testing.T) {
+	// A literal backslash not escaped would leave the following character's
+	// escape ambiguous, making Telegram reject the whole message as invalid
+	// MarkdownV2 (e.g. a Windows path like `C:\Users\a` in an RSS/TV title).
+	got := escapeMarkdown(`C:\Users\a`)
+	want := `C:\\Users\\a`
+	if got != want {
+		t.Fatalf("escapeMarkdown(%q) = %q, want %q", `C:\Users\a`, got, want)
 	}
 }
 

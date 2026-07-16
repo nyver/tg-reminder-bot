@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"runtime/debug"
 	"sync"
 
 	"github.com/nyver2k/remindertgbot/internal/domain"
@@ -35,10 +36,20 @@ func (a *Aggregator) Search(ctx context.Context, q provider.SearchQuery) ([]prov
 
 	for _, p := range a.providers {
 		p := p
-		g.Go(func() error {
-			offers, err := p.Search(ctx, q)
-			if err != nil {
-				a.log.Warn("travel source failed", "type", p.Type(), "err", err)
+		g.Go(func() (err error) {
+			defer func() {
+				if r := recover(); r != nil {
+					a.log.Error("travel source panicked",
+						"type", p.Type(), "panic", r, "stack", string(debug.Stack()))
+					mu.Lock()
+					failures++
+					mu.Unlock()
+					err = nil // degrade gracefully, same as a search error
+				}
+			}()
+			offers, searchErr := p.Search(ctx, q)
+			if searchErr != nil {
+				a.log.Warn("travel source failed", "type", p.Type(), "err", searchErr)
 				observability.TravelSearchTotal.WithLabelValues(p.Type(), "error").Inc()
 				mu.Lock()
 				failures++

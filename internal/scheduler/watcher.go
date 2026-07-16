@@ -3,6 +3,7 @@ package scheduler
 import (
 	"context"
 	"log/slog"
+	"runtime/debug"
 	"time"
 
 	"github.com/google/uuid"
@@ -94,7 +95,7 @@ func (w *Watcher) tick_(ctx context.Context) error {
 		}
 		total += len(batch)
 		for _, rem := range batch {
-			w.processReminder(ctx, rem)
+			w.processReminderSafe(ctx, rem)
 		}
 		if len(batch) < watcherBatchSize {
 			break // no more rows
@@ -105,6 +106,23 @@ func (w *Watcher) tick_(ctx context.Context) error {
 		updateActiveMetrics(ctx, w.reminders)
 	}
 	return nil
+}
+
+// processReminderSafe recovers from a panic in a single reminder's evaluation
+// so one malformed spec or provider bug cannot crash the whole worker process
+// and halt evaluation/delivery for every other user's reminders.
+func (w *Watcher) processReminderSafe(ctx context.Context, rem domain.Reminder) {
+	defer func() {
+		if r := recover(); r != nil {
+			w.log.Error("panic processing reminder",
+				"id", rem.ID,
+				"panic", r,
+				"stack", string(debug.Stack()),
+			)
+			w.scheduleRetry(ctx, rem.ID)
+		}
+	}()
+	w.processReminder(ctx, rem)
 }
 
 func (w *Watcher) processReminder(ctx context.Context, rem domain.Reminder) {

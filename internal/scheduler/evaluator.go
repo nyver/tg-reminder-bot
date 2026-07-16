@@ -260,7 +260,7 @@ func (e *Evaluator) evaluateThreshold(ctx context.Context, r domain.Reminder) ([
 		return nil, nil
 	}
 
-	key := userIdemKey(r.UserID, "threshold:"+now.In(userTZ(r)).Format("2006-01-02"))
+	key := userIdemKey(r.UserID, "threshold:"+r.ID.String()+":"+now.In(userTZ(r)).Format("2006-01-02"))
 	return []PlannedNotification{{
 		FireAt:         now,
 		Text:           renderThresholdText(r.Spec, m, prev),
@@ -308,7 +308,7 @@ func (e *Evaluator) evaluateDigest(ctx context.Context, r domain.Reminder) ([]Pl
 	}
 
 	text := renderDigest(r.Spec, top, prev, from, to)
-	key := userIdemKey(r.UserID, "digest:"+now.In(userTZ(r)).Format("2006-01-02"))
+	key := userIdemKey(r.UserID, "digest:"+r.ID.String()+":"+now.In(userTZ(r)).Format("2006-01-02"))
 	return []PlannedNotification{{
 		FireAt:         now,
 		Text:           text,
@@ -430,10 +430,10 @@ func idemKey(reminderID uuid.UUID, suffix string) string {
 	return fmt.Sprintf("%x", h[:16])
 }
 
-// userIdemKey produces a notification idempotency key scoped to a user rather
-// than a specific reminder. This ensures that even if a user somehow created
-// two identical reminders, only one notification row is ever inserted for the
-// same event (anchor identity, threshold date, etc.).
+// userIdemKey produces a notification idempotency key scoped to a user plus
+// whatever caller-supplied suffix identifies the specific event (reminder ID,
+// anchor identity, date, etc.), so it only dedupes retriggers of the *same*
+// event rather than colliding across a user's independent reminders.
 func userIdemKey(userID int64, suffix string) string {
 	h := sha256.Sum256([]byte(strconv.FormatInt(userID, 10) + ":" + suffix))
 	return fmt.Sprintf("%x", h[:16])

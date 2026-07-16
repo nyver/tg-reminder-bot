@@ -57,7 +57,7 @@ func main() {
 	if cfg.NLU.Provider == "claude" {
 		model = cfg.NLU.Claude.Model
 	}
-	llmParser, err := nlu.NewConfiguredLLMParser(cfg.NLU.Provider, cfg.NLU.APIKey, model, baseURL, cfg.NLU.OpenRouter.FallbackModels, cfg.NLU.OpenRouter.Timeout, cfg.NLU.OpenRouter.ModelTimeout, cfg.NLU.OpenRouter.MaxTokens, loc, log)
+	llmParser, err := nlu.NewConfiguredLLMParser(cfg.NLU.Provider, cfg.NLU.APIKey, model, baseURL, cfg.NLU.OpenRouter.FallbackModels, cfg.NLU.OpenRouter.Timeout, cfg.NLU.OpenRouter.MaxTokens, loc, log)
 	if err != nil {
 		log.Error("nlu init", "err", err)
 		os.Exit(1)
@@ -100,7 +100,7 @@ func main() {
 
 	evaluator := scheduler.NewEvaluator(registry, observationRepo, clock.Real(), cfg.Providers.Travel.MaxHorizonDays, log)
 	if cfg.Providers.RSS.LLMDigest {
-		ranker, err := nlu.NewConfiguredNewsRanker(cfg.NLU.Provider, cfg.NLU.APIKey, model, baseURL, cfg.NLU.OpenRouter.FallbackModels, cfg.NLU.OpenRouter.Timeout, cfg.NLU.OpenRouter.ModelTimeout, cfg.NLU.OpenRouter.MaxTokens, log)
+		ranker, err := nlu.NewConfiguredNewsRanker(cfg.NLU.Provider, cfg.NLU.APIKey, model, baseURL, cfg.NLU.OpenRouter.FallbackModels, cfg.NLU.OpenRouter.Timeout, cfg.NLU.OpenRouter.MaxTokens, log)
 		if err != nil {
 			log.Error("rss llm_digest init", "err", err)
 			os.Exit(1)

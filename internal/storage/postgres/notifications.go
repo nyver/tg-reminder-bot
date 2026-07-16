@@ -162,8 +162,16 @@ func (r *NotificationRepo) Get(ctx context.Context, id uuid.UUID) (*domain.Sched
 	if err != nil {
 		return nil, err
 	}
-	n.ID = mustParseUUID(idStr)
-	n.ReminderID = mustParseUUID(remIDStr)
+	parsedID, err := parseUUID(idStr)
+	if err != nil {
+		return nil, fmt.Errorf("get notification: %w", err)
+	}
+	remID, err := parseUUID(remIDStr)
+	if err != nil {
+		return nil, fmt.Errorf("get notification: %w", err)
+	}
+	n.ID = parsedID
+	n.ReminderID = remID
 	n.SentAt = PtrTime(sentAt)
 	return &n, nil
 }
@@ -178,8 +186,16 @@ func scanNotifications(rows *sql.Rows) ([]domain.ScheduledNotification, error) {
 			&n.IdempotencyKey, &n.Status, &n.Attempts, &n.CreatedAt, &sentAt); err != nil {
 			return nil, err
 		}
-		n.ID = mustParseUUID(idStr)
-		n.ReminderID = mustParseUUID(remIDStr)
+		id, err := parseUUID(idStr)
+		if err != nil {
+			return nil, fmt.Errorf("scan notification: %w", err)
+		}
+		remID, err := parseUUID(remIDStr)
+		if err != nil {
+			return nil, fmt.Errorf("scan notification: %w", err)
+		}
+		n.ID = id
+		n.ReminderID = remID
 		n.SentAt = PtrTime(sentAt)
 		result = append(result, n)
 	}

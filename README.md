@@ -498,15 +498,13 @@ nlu:
     fallback_models:
       - mistralai/mistral-7b-instruct:free
       - meta-llama/llama-3.2-3b-instruct:free
-    timeout: 60s
-    model_timeout: 30s
+    timeout: 30s
     max_tokens: 1024
 ```
 
 When a model is rate-limited, unavailable, returns an empty response, or
-exceeds `model_timeout`, OpenRouter tries the models in `fallback_models`
-in order. `timeout` is the overall HTTP timeout for an OpenRouter request,
-`model_timeout` is the per-model attempt timeout before fallback, and
+exceeds `timeout`, OpenRouter tries the models in `fallback_models` in
+order. `timeout` is the per-model attempt timeout before fallback, and
 `max_tokens` bounds the response size.
 
 For a direct connection to Anthropic:

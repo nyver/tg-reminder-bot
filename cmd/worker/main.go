@@ -93,7 +93,7 @@ func main() {
 		if cfg.NLU.Provider == "claude" {
 			model = cfg.NLU.Claude.Model
 		}
-		ranker, err := nlu.NewConfiguredNewsRanker(cfg.NLU.Provider, cfg.NLU.APIKey, model, cfg.NLU.OpenRouter.BaseURL, cfg.NLU.OpenRouter.FallbackModels, cfg.NLU.OpenRouter.Timeout, cfg.NLU.OpenRouter.ModelTimeout, cfg.NLU.OpenRouter.MaxTokens, log)
+		ranker, err := nlu.NewConfiguredNewsRanker(cfg.NLU.Provider, cfg.NLU.APIKey, model, cfg.NLU.OpenRouter.BaseURL, cfg.NLU.OpenRouter.FallbackModels, cfg.NLU.OpenRouter.Timeout, cfg.NLU.OpenRouter.MaxTokens, log)
 		if err != nil {
 			log.Error("rss llm_digest init", "err", err)
 			os.Exit(1)

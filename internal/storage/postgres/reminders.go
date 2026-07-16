@@ -280,7 +280,11 @@ func scanReminder(row rowScanner) (*domain.Reminder, error) {
 	); err != nil {
 		return nil, err
 	}
-	rem.ID = mustParseUUID(idStr)
+	id, err := parseUUID(idStr)
+	if err != nil {
+		return nil, fmt.Errorf("scan reminder: %w", err)
+	}
+	rem.ID = id
 	rem.EvalCron = evalCron.String
 	rem.NextEvalAt = PtrTime(nextEvalAt)
 	if err := json.Unmarshal(specJSON, &rem.Spec); err != nil {
@@ -301,10 +305,13 @@ func scanReminders(rows *sql.Rows) ([]domain.Reminder, error) {
 	return result, rows.Err()
 }
 
-func mustParseUUID(s string) uuid.UUID {
+// parseUUID parses a UUID column value, returning an error instead of
+// uuid.Nil on failure so a corrupted/truncated id surfaces as a query error
+// rather than silently producing a row whose ID can never be matched again.
+func parseUUID(s string) (uuid.UUID, error) {
 	id, err := uuid.Parse(s)
 	if err != nil {
-		return uuid.Nil
+		return uuid.Nil, fmt.Errorf("parse uuid %q: %w", s, err)
 	}
-	return id
+	return id, nil
 }

@@ -52,7 +52,7 @@ func NewLLMParser(apiKey string, loc *time.Location) *LLMParser {
 // NewConfiguredLLMParser creates an Anthropic or OpenRouter-backed parser.
 type llmContentValidator func(string) error
 
-func NewConfiguredLLMParser(provider, apiKey, model, baseURL string, fallbackModels []string, timeout, modelTimeout time.Duration, maxTokens int, loc *time.Location, logs ...*slog.Logger) (*LLMParser, error) {
+func NewConfiguredLLMParser(provider, apiKey, model, baseURL string, fallbackModels []string, timeout time.Duration, maxTokens int, loc *time.Location, logs ...*slog.Logger) (*LLMParser, error) {
 	if loc == nil {
 		loc = time.UTC
 	}
@@ -79,7 +79,7 @@ func NewConfiguredLLMParser(provider, apiKey, model, baseURL string, fallbackMod
 			return nil, fmt.Errorf("invalid OpenRouter base URL: %w", err)
 		}
 		models := append([]string{model}, fallbackModels...)
-		return &LLMParser{model: model, loc: loc, complete: openRouterCompleter(apiKey, models, baseURL, timeout, modelTimeout, maxTokens, log, "nlu_parser", nil)}, nil
+		return &LLMParser{model: model, loc: loc, complete: openRouterCompleter(apiKey, models, baseURL, timeout, maxTokens, log, "nlu_parser", validateNLUResponseContent)}, nil
 	default:
 		return nil, fmt.Errorf("unsupported NLU provider %q", provider)
 	}
@@ -91,7 +91,7 @@ func NewConfiguredLLMParser(provider, apiKey, model, baseURL string, fallbackMod
 // up to maxServerRetries times with exponential back-off. Any other error
 // (auth, malformed request, etc.) applies to every model equally, so it
 // propagates immediately instead of cycling through the rest of the list.
-func openRouterCompleter(apiKey string, models []string, baseURL string, timeout, modelTimeout time.Duration, maxTokens int, log *slog.Logger, component string, validate llmContentValidator) func(context.Context, string) (string, error) {
+func openRouterCompleter(apiKey string, models []string, baseURL string, timeout time.Duration, maxTokens int, log *slog.Logger, component string, validate llmContentValidator) func(context.Context, string) (string, error) {
 	const maxServerRetries = 2
 	if timeout <= 0 {
 		timeout = 60 * time.Second
@@ -101,7 +101,6 @@ func openRouterCompleter(apiKey string, models []string, baseURL string, timeout
 	}
 	client := &http.Client{Timeout: timeout}
 	endpoint := strings.TrimRight(baseURL, "/") + "/chat/completions"
-	modelTimeout = openRouterModelTimeout(timeout, modelTimeout)
 
 	return func(ctx context.Context, prompt string) (string, error) {
 		var lastErr error
@@ -112,9 +111,9 @@ func openRouterCompleter(apiKey string, models []string, baseURL string, timeout
 				"model", model,
 				"fallback", i > 0,
 				"model_index", i,
-				"model_timeout", modelTimeout.String(),
+				"timeout", timeout.String(),
 			)
-			modelCtx, cancel := context.WithTimeout(ctx, modelTimeout)
+			modelCtx, cancel := context.WithTimeout(ctx, timeout)
 			content, tryNextModel, err := callOpenRouterModel(modelCtx, client, endpoint, apiKey, model, prompt, maxTokens, maxServerRetries, log, component)
 			modelDeadlineExceeded := errors.Is(modelCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil
 			cancel()
@@ -154,16 +153,6 @@ func openRouterCompleter(apiKey string, models []string, baseURL string, timeout
 		}
 		return "", lastErr
 	}
-}
-
-func openRouterModelTimeout(total, configured time.Duration) time.Duration {
-	if configured <= 0 {
-		configured = 30 * time.Second
-	}
-	if total > 0 && total < configured {
-		return total
-	}
-	return configured
 }
 
 // callOpenRouterModel calls one specific model, retrying on 5xx.
@@ -374,6 +363,24 @@ type llmEvent struct {
 	Params map[string]string `json:"params,omitempty"`
 }
 
+// validateNLUResponseContent checks that a raw completion parses as the
+// expected llmResponse JSON shape with a non-empty "kind" field. Without this
+// check, callOpenRouterModel treats any non-blank HTTP 200 response as a
+// success (see below) — so a model that replies with plain prose (a refusal,
+// an apology, chatty text) instead of JSON would short-circuit the fallback
+// chain instead of letting the next model in the list attempt the request.
+func validateNLUResponseContent(raw string) error {
+	raw = extractJSON(raw)
+	var resp llmResponse
+	if err := json.Unmarshal([]byte(raw), &resp); err != nil {
+		return fmt.Errorf("invalid nlu json: %w", err)
+	}
+	if resp.Kind == "" {
+		return fmt.Errorf("nlu response missing kind")
+	}
+	return nil
+}
+
 func (p *LLMParser) Parse(ctx context.Context, text string) (*ParseResult, error) {
 	now := time.Now().In(p.loc)
 	prompt := buildPrompt(text, now)
@@ -467,10 +474,33 @@ func extractJSON(s string) string {
 	return s
 }
 
+// minTopN/maxTopN bound Spec.TopN parsed from free-form LLM output. Matches
+// the range enforced for the explicit /rss command (see rssMinTopN/rssMaxTopN
+// in internal/telegram/handlers.go) so a conversational request like "дайджест
+// топ 99999 новостей" can't inflate the ranking candidate pool or downstream
+// message size beyond what the explicit command path already allows.
+const (
+	minTopN = 1
+	maxTopN = 20
+)
+
+func clampTopN(n int) int {
+	switch {
+	case n <= 0:
+		return 0 // let callers apply their own default via orDefault
+	case n > maxTopN:
+		return maxTopN
+	case n < minTopN:
+		return minTopN
+	default:
+		return n
+	}
+}
+
 func mapToResult(resp *llmResponse) (*ParseResult, error) {
 	spec := &domain.Spec{
 		Message:     resp.Message,
-		TopN:        resp.TopN,
+		TopN:        clampTopN(resp.TopN),
 		HorizonDays: resp.HorizonDays,
 		Event: domain.EventSpec{
 			Type:   resp.Event.Type,

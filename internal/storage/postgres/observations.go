@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -79,8 +80,16 @@ func scanObservation(row rowScanner) (*domain.Observation, error) {
 	); err != nil {
 		return nil, err
 	}
-	obs.ID = mustParseUUID(idStr)
-	obs.ReminderID = mustParseUUID(remIDStr)
+	id, err := parseUUID(idStr)
+	if err != nil {
+		return nil, fmt.Errorf("scan observation: %w", err)
+	}
+	remID, err := parseUUID(remIDStr)
+	if err != nil {
+		return nil, fmt.Errorf("scan observation: %w", err)
+	}
+	obs.ID = id
+	obs.ReminderID = remID
 	obs.Raw = json.RawMessage(rawStr)
 	return obs, nil
 }

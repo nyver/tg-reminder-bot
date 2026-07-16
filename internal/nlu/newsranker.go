@@ -25,7 +25,7 @@ type NewsRanker struct {
 
 // NewConfiguredNewsRanker builds a NewsRanker using the same provider/model
 // configuration as the NLU intent parser (see NewConfiguredLLMParser).
-func NewConfiguredNewsRanker(providerName, apiKey, model, baseURL string, fallbackModels []string, timeout, modelTimeout time.Duration, maxTokens int, logs ...*slog.Logger) (*NewsRanker, error) {
+func NewConfiguredNewsRanker(providerName, apiKey, model, baseURL string, fallbackModels []string, timeout time.Duration, maxTokens int, logs ...*slog.Logger) (*NewsRanker, error) {
 	if maxTokens <= 0 {
 		maxTokens = 1024
 	}
@@ -46,7 +46,7 @@ func NewConfiguredNewsRanker(providerName, apiKey, model, baseURL string, fallba
 		}}, nil
 	case "openrouter":
 		models := append([]string{model}, fallbackModels...)
-		return &NewsRanker{complete: openRouterCompleter(apiKey, models, baseURL, timeout, modelTimeout, maxTokens, log, "news_ranker", validateRankedItemsContent)}, nil
+		return &NewsRanker{complete: openRouterCompleter(apiKey, models, baseURL, timeout, maxTokens, log, "news_ranker", validateRankedItemsContent)}, nil
 	default:
 		return nil, fmt.Errorf("unsupported NLU provider %q", providerName)
 	}

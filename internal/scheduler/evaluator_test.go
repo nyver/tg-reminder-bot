@@ -102,6 +102,61 @@ func TestAnchorTransientErrorReturnsNil(t *testing.T) {
 	}
 }
 
+// fixedHistory returns a preset previous observation, letting tests exercise
+// the "value dropped since last observation" branch of evaluateThreshold.
+type fixedHistory struct {
+	last *domain.Observation
+}
+
+func (f *fixedHistory) Last(ctx context.Context, reminderID uuid.UUID) (*domain.Observation, error) {
+	if f.last == nil {
+		return nil, domain.ErrNotFound
+	}
+	return f.last, nil
+}
+
+func (f *fixedHistory) Save(ctx context.Context, obs *domain.Observation) error { return nil }
+
+// TestThresholdIdempotencyKeyDiffersPerReminder guards against a regression
+// where two independent price-watch reminders for the same user, both
+// dropping in price on the same day, computed the identical idempotency key
+// (scoped only to user+date) — the second notification's INSERT silently
+// no-oped against the notifications table's ON CONFLICT, dropping it.
+func TestThresholdIdempotencyKeyDiffersPerReminder(t *testing.T) {
+	now := time.Date(2026, 6, 22, 8, 0, 0, 0, time.UTC)
+	registry := provider.NewRegistry()
+	registry.RegisterMetric(metricProviderFunc(func(context.Context, provider.Query) (provider.Measurement, error) {
+		return provider.Measurement{Available: true, Value: 90, Currency: "RUB"}, nil
+	}))
+	hist := &fixedHistory{last: &domain.Observation{Value: 100}}
+	evaluator := NewEvaluator(registry, hist, clock.NewFake(now), 180, nil)
+
+	base := domain.Reminder{
+		UserID: 42, Kind: domain.KindConditional,
+		Spec: domain.Spec{
+			Trigger: domain.TriggerThreshold,
+			Event:   domain.EventSpec{Type: "price", Params: map[string]string{"url": "https://shop.test/a"}},
+		},
+	}
+	remA, remB := base, base
+	remA.ID, remB.ID = uuid.New(), uuid.New()
+
+	plannedA, err := evaluator.Evaluate(context.Background(), remA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plannedB, err := evaluator.Evaluate(context.Background(), remB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plannedA) != 1 || len(plannedB) != 1 {
+		t.Fatalf("expected 1 notification each, got %d and %d", len(plannedA), len(plannedB))
+	}
+	if plannedA[0].IdempotencyKey == plannedB[0].IdempotencyKey {
+		t.Fatalf("two independent reminders for the same user collided on idempotency key %q", plannedA[0].IdempotencyKey)
+	}
+}
+
 func TestThresholdProviderErrorNotifiesUser(t *testing.T) {
 	now := time.Date(2026, 6, 22, 8, 0, 0, 0, time.UTC)
 	registry := provider.NewRegistry()

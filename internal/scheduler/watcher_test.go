@@ -115,6 +115,36 @@ func TestWatcherMarksReminderFailedForInvalidCron(t *testing.T) {
 	}
 }
 
+// TestProcessReminderSafeRecoversPanic guards against a regression where a
+// panic evaluating a single malformed reminder (e.g. a provider bug) would
+// crash the whole watcher process and halt evaluation for every other user's
+// reminders. processReminderSafe must recover and schedule a retry instead.
+func TestProcessReminderSafeRecoversPanic(t *testing.T) {
+	now := time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)
+	registry := provider.NewRegistry()
+	registry.RegisterMetric(metricProviderFunc(func(context.Context, provider.Query) (provider.Measurement, error) {
+		panic("boom")
+	}))
+	store := &watcherReminderStore{}
+	evaluator := NewEvaluator(registry, nil, clock.NewFake(now), 30, nil)
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	watcher := NewWatcher(store, &watcherNotificationStore{}, evaluator, "test-worker", time.Second, log)
+	rem := domain.Reminder{
+		ID:   uuid.New(),
+		Kind: domain.KindConditional,
+		Spec: domain.Spec{
+			Trigger: domain.TriggerThreshold,
+			Event:   domain.EventSpec{Type: "price", Params: map[string]string{"url": "https://shop.test/a"}},
+		},
+	}
+
+	watcher.processReminderSafe(context.Background(), rem) // must not panic
+
+	if store.next[rem.ID] == nil {
+		t.Fatal("expected the panic to schedule a retry rather than propagate")
+	}
+}
+
 func TestWatcherFinishesSuccessfulOneShotReminder(t *testing.T) {
 	now := time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)
 	store := &watcherReminderStore{}

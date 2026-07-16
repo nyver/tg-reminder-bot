@@ -1009,7 +1009,15 @@ func (h *Handler) startParsing(ctx context.Context, c tele.Context, userID int64
 		return c.Send(msgParseFailed, mainMenu())
 	}
 
-	// Ask clarification if fields are missing.
+	return h.continueParsing(ctx, c, userID, text, result, userTZ)
+}
+
+// continueParsing asks for any still-missing fields, otherwise validates and
+// shows the confirmation dialog. Shared by the initial free-text parse and
+// the field-clarification follow-up (handleFieldInput) so answering one of
+// several missing fields re-prompts for whatever is still missing instead of
+// jumping straight to a confirmation that validateParseResult will reject.
+func (h *Handler) continueParsing(ctx context.Context, c tele.Context, userID int64, text string, result *nlu.ParseResult, userTZ string) error {
 	if len(result.Missing) > 0 {
 		ctxData := &DialogContext{
 			RawText:    text,
@@ -1040,7 +1048,6 @@ func (h *Handler) startParsing(ctx context.Context, c tele.Context, userID int64
 		return c.Send("Не удалось определить все параметры напоминания. Попробуйте переформулировать.")
 	}
 
-	// Show confirmation.
 	return h.askConfirmation(ctx, c, userID, text, result, userTZ)
 }
 
@@ -1355,7 +1362,7 @@ func (h *Handler) handleFieldInput(ctx context.Context, c tele.Context, dialog *
 		_ = h.dialogs.Reset(ctx, c.Sender().ID)
 		return c.Send("Не удалось распознать. Попробуйте описать напоминание заново.")
 	}
-	return h.askConfirmation(ctx, c, c.Sender().ID, combined, result, dc.UserTZ)
+	return h.continueParsing(ctx, c, c.Sender().ID, combined, result, dc.UserTZ)
 }
 
 const (
@@ -1701,6 +1708,7 @@ func fieldPrompt(field string) string {
 // mdReplacer escapes all MarkdownV2 special characters.
 // Initialised once at package load — strings.NewReplacer is not cheap.
 var mdReplacer = strings.NewReplacer(
+	"\\", "\\\\",
 	"_", "\\_", "*", "\\*", "[", "\\[", "]", "\\]",
 	"(", "\\(", ")", "\\)", "~", "\\~", "`", "\\`",
 	">", "\\>", "#", "\\#", "+", "\\+", "-", "\\-",
@@ -1725,7 +1733,7 @@ const (
 
 func confirmationDecision(text string) confirmDecision {
 	normalized := strings.ToLower(strings.TrimSpace(text))
-	normalized = strings.Trim(normalized, ".!, ")
+	normalized = strings.Trim(normalized, ".!,? ")
 	switch normalized {
 	case "да", "д", "yes", "y", "ok", "ок", "создать", "сохрани", "сохранить", "подтверждаю":
 		return confirmDecisionYes

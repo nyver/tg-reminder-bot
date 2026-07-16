@@ -2,7 +2,10 @@ package postgres
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"time"
 )
 
@@ -18,7 +21,10 @@ func (r *CacheRepo) Get(ctx context.Context, key string) (json.RawMessage, bool,
 	row := r.db.QueryRowContext(ctx, q, key)
 	var val string
 	if err := row.Scan(&val); err != nil {
-		return nil, false, nil
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("cache get: %w", err)
 	}
 	return json.RawMessage(val), true, nil
 }
@@ -27,7 +33,10 @@ func (r *CacheRepo) GetStale(ctx context.Context, key string) (json.RawMessage, 
 	row := r.db.QueryRowContext(ctx, r.db.Rebind(`SELECT value FROM provider_cache WHERE key=$1`), key)
 	var val string
 	if err := row.Scan(&val); err != nil {
-		return nil, false, nil
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("cache get stale: %w", err)
 	}
 	return json.RawMessage(val), true, nil
 }

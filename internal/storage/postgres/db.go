@@ -115,7 +115,12 @@ func (db *DB) ForUpdateSkipLocked() string {
 
 // InClause builds a parameterised IN clause starting at parameter index start.
 // Returns the SQL fragment (e.g. "IN ($2,$3,$4)") and the args to append.
+// n<=0 returns "IN (NULL)", a valid clause that matches no rows, instead of
+// panicking on the slice-bounds arithmetic below.
 func (db *DB) InClause(start int, n int) string {
+	if n <= 0 {
+		return "IN (NULL)"
+	}
 	if db.Dialect == "sqlite" {
 		return "IN (" + strings.Repeat("?,", n)[:2*n-1] + ")"
 	}
@@ -124,24 +129,6 @@ func (db *DB) InClause(start int, n int) string {
 		parts[i] = fmt.Sprintf("$%d", start+i)
 	}
 	return "IN (" + strings.Join(parts, ",") + ")"
-}
-
-// ExecUpdateLocked sets locked_at/locked_by on a batch of UUIDs.
-func (db *DB) ExecUpdateLocked(ctx context.Context, table, workerID string, ids []string) error {
-	if len(ids) == 0 {
-		return nil
-	}
-	now := db.Now()
-	in := db.InClause(2, len(ids))
-	args := make([]any, 0, 1+len(ids))
-	args = append(args, workerID)
-	for _, id := range ids {
-		args = append(args, id)
-	}
-	q := fmt.Sprintf(`UPDATE %s SET locked_at=%s, locked_by=$1 WHERE id %s`, table, now, in)
-	q = db.Rebind(q)
-	_, err := db.ExecContext(ctx, q, args...)
-	return err
 }
 
 // NullString converts *string to sql.NullString.

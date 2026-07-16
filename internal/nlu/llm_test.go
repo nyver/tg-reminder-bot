@@ -53,7 +53,7 @@ func TestOpenRouterParser_fallbackOn429(t *testing.T) {
 	}))
 	defer server.Close()
 
-	parser, err := NewConfiguredLLMParser("openrouter", "test-key", primaryModel, server.URL, []string{fallbackModel}, 0, 0, 0, time.UTC)
+	parser, err := NewConfiguredLLMParser("openrouter", "test-key", primaryModel, server.URL, []string{fallbackModel}, 0, 0, time.UTC)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,6 +66,74 @@ func TestOpenRouterParser_fallbackOn429(t *testing.T) {
 	}
 	if n := requests.Load(); n != 2 {
 		t.Fatalf("total requests = %d, want 2", n)
+	}
+}
+
+// TestOpenRouterParserFallsBackOnNonJSONProse guards against a regression
+// where the NLU parser passed a nil content validator to openRouterCompleter
+// (unlike the news ranker), so a primary model replying with plain prose
+// instead of the required JSON — a refusal, an apology, chatty text — was
+// treated as a successful response and never triggered the fallback chain.
+func TestOpenRouterParserFallsBackOnNonJSONProse(t *testing.T) {
+	t.Parallel()
+	var requests atomic.Int32
+
+	const primaryModel = "chatty/model"
+	const fallbackModel = "fallback/model"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		idx := requests.Add(1)
+		var req struct {
+			Model string `json:"model"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if idx == 1 {
+			if req.Model != primaryModel {
+				t.Errorf("request 1 model = %q, want %q", req.Model, primaryModel)
+			}
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"Sorry, I can't help with that request."}}]}`))
+			return
+		}
+		if req.Model != fallbackModel {
+			t.Errorf("request 2 model = %q, want %q", req.Model, fallbackModel)
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"kind\":\"absolute\",\"message\":\"test\",\"confidence\":0.9}"}}]}`))
+	}))
+	defer server.Close()
+
+	parser, err := NewConfiguredLLMParser("openrouter", "test-key", primaryModel, server.URL, []string{fallbackModel}, 0, 0, time.UTC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := parser.Parse(context.Background(), "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Confidence != 0.9 {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+	if n := requests.Load(); n != 2 {
+		t.Fatalf("total requests = %d, want 2 (fallback should have been used)", n)
+	}
+}
+
+func TestClampTopN(t *testing.T) {
+	cases := []struct {
+		in, want int
+	}{
+		{0, 0},        // let orDefault apply its own default downstream
+		{-5, 0},
+		{1, 1},
+		{20, 20},
+		{99999, maxTopN},
+	}
+	for _, tc := range cases {
+		if got := clampTopN(tc.in); got != tc.want {
+			t.Errorf("clampTopN(%d) = %d, want %d", tc.in, got, tc.want)
+		}
 	}
 }
 
@@ -102,7 +170,7 @@ func TestOpenRouterParser_fallbackOn404(t *testing.T) {
 	}))
 	defer server.Close()
 
-	parser, err := NewConfiguredLLMParser("openrouter", "test-key", primaryModel, server.URL, []string{fallbackModel}, 0, 0, 0, time.UTC)
+	parser, err := NewConfiguredLLMParser("openrouter", "test-key", primaryModel, server.URL, []string{fallbackModel}, 0, 0, time.UTC)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,7 +217,7 @@ func TestOpenRouterParserFallbackOnEmptyContent(t *testing.T) {
 	}))
 	defer server.Close()
 
-	parser, err := NewConfiguredLLMParser("openrouter", "test-key", primaryModel, server.URL, []string{fallbackModel}, 0, 0, 0, time.UTC)
+	parser, err := NewConfiguredLLMParser("openrouter", "test-key", primaryModel, server.URL, []string{fallbackModel}, 0, 0, time.UTC)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,7 +262,7 @@ func TestOpenRouterParserFallbackOnSlowModel(t *testing.T) {
 	}))
 	defer server.Close()
 
-	parser, err := NewConfiguredLLMParser("openrouter", "test-key", primaryModel, server.URL, []string{fallbackModel}, 200*time.Millisecond, 20*time.Millisecond, 0, time.UTC)
+	parser, err := NewConfiguredLLMParser("openrouter", "test-key", primaryModel, server.URL, []string{fallbackModel}, 20*time.Millisecond, 0, time.UTC)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,18 +275,6 @@ func TestOpenRouterParserFallbackOnSlowModel(t *testing.T) {
 	}
 	if n := requests.Load(); n != 2 {
 		t.Fatalf("total requests = %d, want 2", n)
-	}
-}
-
-func TestOpenRouterModelTimeout(t *testing.T) {
-	if got := openRouterModelTimeout(60*time.Second, 0); got != 30*time.Second {
-		t.Fatalf("default model timeout = %s, want 30s", got)
-	}
-	if got := openRouterModelTimeout(60*time.Second, 45*time.Second); got != 45*time.Second {
-		t.Fatalf("configured model timeout = %s, want 45s", got)
-	}
-	if got := openRouterModelTimeout(2*time.Second, 30*time.Second); got != 2*time.Second {
-		t.Fatalf("model timeout capped by total timeout = %s, want 2s", got)
 	}
 }
 
@@ -243,7 +299,7 @@ func TestOpenRouterParserLogsInitialModelAndFallback(t *testing.T) {
 	log := slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	parser, err := NewConfiguredLLMParser(
 		"openrouter", "test-key", primaryModel, server.URL,
-		[]string{fallbackModel}, 0, 0, 0, time.UTC, log,
+		[]string{fallbackModel}, 0, 0, time.UTC, log,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -282,7 +338,7 @@ func TestOpenRouterParser_allModelsRateLimited(t *testing.T) {
 
 	parser, err := NewConfiguredLLMParser(
 		"openrouter", "test-key", "m1/free", server.URL,
-		[]string{"m2/free", "m3/free"}, 0, 0, 0, time.UTC,
+		[]string{"m2/free", "m3/free"}, 0, 0, time.UTC,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -294,7 +350,7 @@ func TestOpenRouterParser_allModelsRateLimited(t *testing.T) {
 
 func TestConfiguredLLMParserRejectsUnknownProvider(t *testing.T) {
 	t.Parallel()
-	if _, err := NewConfiguredLLMParser("unknown", "", "", "", nil, 0, 0, 0, time.UTC); err == nil {
+	if _, err := NewConfiguredLLMParser("unknown", "", "", "", nil, 0, 0, time.UTC); err == nil {
 		t.Fatal("expected an error")
 	}
 }

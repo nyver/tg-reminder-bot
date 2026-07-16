@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"sync"
@@ -90,6 +91,13 @@ func (p *Provider) Fetch(ctx context.Context, q provider.Query) ([]provider.News
 		wg.Add(1)
 		go func(i int, feedURL string) {
 			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					p.log.Error("rss provider: panic fetching feed",
+						"url", feedURL, "panic", r, "stack", string(debug.Stack()))
+					results[i] = result{err: fmt.Errorf("panic fetching feed: %v", r)}
+				}
+			}()
 			items, err := p.fetchOne(ctx, feedURL)
 			results[i] = result{items: items, err: err}
 		}(i, u)

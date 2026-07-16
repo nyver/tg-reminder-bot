@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"math"
+	"runtime/debug"
 	"time"
 
 	"github.com/google/uuid"
@@ -80,20 +81,51 @@ func (w *Worker) process(ctx context.Context) error {
 	}
 
 	for _, n := range batch {
-		w.deliver(ctx, n)
+		w.deliverSafe(ctx, n)
 	}
 	return nil
+}
+
+// deliverSafe recovers from a panic delivering a single notification so one
+// malformed notification cannot crash the whole worker process and halt
+// delivery for every other user's notifications.
+func (w *Worker) deliverSafe(ctx context.Context, n domain.ScheduledNotification) {
+	defer func() {
+		if r := recover(); r != nil {
+			w.log.Error("panic delivering notification",
+				"notification_id", n.ID,
+				"panic", r,
+				"stack", string(debug.Stack()),
+			)
+		}
+	}()
+	w.deliver(ctx, n)
 }
 
 func (w *Worker) deliver(ctx context.Context, n domain.ScheduledNotification) {
 	rem, err := w.reminders.Get(ctx, n.ReminderID)
 	if err != nil {
-		w.log.Error("reminder lookup failed", "id", n.ReminderID, "err", err)
 		attempts := n.Attempts + 1
 		if errors.Is(err, domain.ErrNotFound) {
-			attempts = maxAttempts // reminder deleted — no point retrying
+			// Reminder deleted — no point retrying.
+			w.log.Warn("reminder lookup failed, reminder gone", "id", n.ReminderID, "err", err)
+			_ = w.notifications.MarkFailed(ctx, n.ID, maxAttempts)
+			return
 		}
-		_ = w.notifications.MarkFailed(ctx, n.ID, attempts)
+		// Transient error (e.g. DB hiccup): back off like a send failure instead
+		// of leaving fire_at untouched, which would let LeasePending re-lease
+		// this row on every tick in a tight busy-retry loop.
+		w.log.Warn("reminder lookup failed, will retry", "id", n.ReminderID, "attempt", attempts, "err", err)
+		observability.NotificationsFailedTotal.Inc()
+		if attempts >= maxAttempts {
+			_ = w.notifications.MarkFailed(ctx, n.ID, attempts)
+			return
+		}
+		delay := backoffDuration(attempts)
+		nextFire := time.Now().UTC().Add(delay)
+		if err := w.notifications.UpdateFireAt(ctx, n.ID, nextFire); err != nil {
+			w.log.Error("update fire_at failed", "notification_id", n.ID, "err", err)
+		}
 		return
 	}
 
