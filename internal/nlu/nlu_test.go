@@ -426,3 +426,94 @@ func TestParseLeadTime(t *testing.T) {
 		}
 	}
 }
+
+func TestFastPathParsesWeatherForecasts(t *testing.T) {
+	parser := NewFastPath()
+	tests := []struct {
+		text    string
+		day     string
+		cron    string
+		oneShot bool
+	}{
+		{"пришли прогноз погоды на сегодня", "today", "", true},
+		{"пришли прогноз погоды на завтра", "tomorrow", "", true},
+		{"каждое утро присылай прогноз погоды на день", "today", "0 8 * * *", false},
+		{"каждое утро в 07:30 присылай прогноз погоды на день", "today", "30 7 * * *", false},
+	}
+	for _, test := range tests {
+		t.Run(test.text, func(t *testing.T) {
+			result, err := parser.Parse(context.Background(), test.text, time.UTC)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Kind != domain.KindConditional || result.Spec.Trigger != domain.TriggerAnchor || result.Spec.Event.Type != "weather" {
+				t.Fatalf("result = %+v, spec = %+v", result, result.Spec)
+			}
+			if result.Spec.Event.Params["day"] != test.day || result.EvalCron != test.cron {
+				t.Fatalf("params = %+v, cron = %q", result.Spec.Event.Params, result.EvalCron)
+			}
+			if test.oneShot && result.FireAt != nil {
+				t.Fatalf("immediate forecast unexpectedly has fire_at %v", *result.FireAt)
+			}
+		})
+	}
+}
+
+func TestFastPathParsesWeatherRainAndTemperatureAlerts(t *testing.T) {
+	parser := NewFastPath()
+	rain, err := parser.Parse(context.Background(), "предупреди завтра утром, если будет дождь", time.UTC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rain.Spec.Event.Type != "weather" || rain.Spec.Event.Params["condition"] != "rain" || rain.FireAt == nil {
+		t.Fatalf("rain result = %+v, spec = %+v", rain, rain.Spec)
+	}
+	if _, err := time.Parse(time.RFC3339, *rain.FireAt); err != nil {
+		t.Fatalf("invalid rain fire_at %q: %v", *rain.FireAt, err)
+	}
+
+	temperature, err := parser.Parse(context.Background(), "уведоми, если ночью ожидается ниже -10", time.UTC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	condition := temperature.Spec.Condition
+	if temperature.Spec.Trigger != domain.TriggerThreshold || temperature.Spec.Event.Type != "weather" || condition == nil {
+		t.Fatalf("temperature result = %+v, spec = %+v", temperature, temperature.Spec)
+	}
+	if condition.Target == nil || *condition.Target != -100 || condition.Operator != domain.ConditionOperatorLT || condition.EdgeTriggered || condition.Cooldown.Duration != 24*time.Hour {
+		t.Fatalf("condition = %+v", condition)
+	}
+	if temperature.Spec.Event.Params["day"] != "next_night" || temperature.Spec.Event.Params["period"] != "night" {
+		t.Fatalf("params = %+v", temperature.Spec.Event.Params)
+	}
+}
+
+func TestMapToResultScalesWeatherTemperature(t *testing.T) {
+	target := int64(-10)
+	edge := false
+	result, err := mapToResult(&llmResponse{
+		Kind: "conditional", Trigger: "threshold", Message: "мороз",
+		Condition:  &llmCondition{Operator: "lt", Target: &target, EdgeTriggered: &edge, Cooldown: "24h"},
+		Event:      llmEvent{Type: "weather", Params: map[string]string{"day": "next_night", "period": "night"}},
+		Confidence: 0.9,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Spec.Condition.Target == nil || *result.Spec.Condition.Target != -100 {
+		t.Fatalf("target = %v", result.Spec.Condition.Target)
+	}
+}
+
+func TestMapToResultRejectsWeatherTemperatureOutOfRange(t *testing.T) {
+	target := int64(1000)
+	_, err := mapToResult(&llmResponse{
+		Kind: "conditional", Trigger: "threshold", Message: "температура",
+		Condition:  &llmCondition{Operator: "lt", Target: &target},
+		Event:      llmEvent{Type: "weather"},
+		Confidence: 0.9,
+	})
+	if err == nil {
+		t.Fatal("expected out-of-range weather target error")
+	}
+}

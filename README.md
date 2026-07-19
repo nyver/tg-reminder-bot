@@ -58,9 +58,14 @@ Example messages (the bot's NLU understands Russian):
 уведоми за 3 часа до КВН на Первом
 уведоми при снижении цены: https://example.com/product
 каждый день в 18:00 создай дайджест новостей на основе https://lenta.ru/rss
+предупреди завтра утром, если будет дождь
+уведоми, если ночью ожидается ниже -10
+каждое утро присылай прогноз погоды на день
+пришли прогноз погоды на сегодня
+пришли прогноз погоды на завтра
 ```
 
-The last example creates a periodic RSS news digest — see
+The RSS example creates a periodic news digest — see
 [RSS news digest](#rss-news-digest) below for details; the same reminder can
 also be created directly with `/rss https://lenta.ru/rss | 18:00`.
 
@@ -318,10 +323,66 @@ behavior. Legacy specs with top-level `target` and `direction` remain readable;
 `below` maps to `lt`, `above` maps to `gt`, and an omitted direction retains
 the historical lower-than-previous behavior.
 
-The repository currently includes a price metric provider. Other examples
-such as temperature, exchange rates, stock availability, and page hashes need
-a corresponding `MetricProvider`, but use the same evaluator without further
+The repository includes price and weather metric providers. Other examples
+such as exchange rates, stock availability, and page hashes need a
+corresponding `MetricProvider`, but use the same evaluator without further
 scheduler changes.
+
+## Weather forecasts and alerts
+
+The weather provider uses [Open-Meteo's forecast API](https://open-meteo.com/en/docs)
+and [geocoding API](https://open-meteo.com/en/docs/geocoding-api). The public
+non-commercial endpoints do not require an API key. A location named in a
+reminder is geocoded and cached; when no city is present, the provider uses
+`providers.weather.default_location`.
+
+Supported free-text scenarios include:
+
+```text
+предупреди завтра утром, если будет дождь
+уведоми, если ночью ожидается ниже -10
+каждое утро присылай прогноз погоды на день
+пришли прогноз погоды на сегодня
+пришли прогноз погоды на завтра
+```
+
+Forecast requests are implemented as weather events. Requests for today or
+tomorrow run once immediately; `каждое утро` creates a daily event schedule
+(08:00 by default), and a rain warning evaluates once at the requested morning
+time and sends nothing when rain is not forecast. Daily messages include the
+WMO weather condition, actual and apparent temperature range, precipitation
+probability and amount, and maximum wind speed.
+
+Temperature alerts use the generic threshold evaluator. The provider samples
+the minimum forecast temperature for the upcoming night (00:00–05:59 local
+time), stores it internally in tenths of a degree, and compares it with the
+user's Celsius threshold. Level-triggered alerts use a 24-hour cooldown, so an
+already-matching forecast can notify immediately without sending on every
+poll.
+
+The timezone set with `/tz` controls forecast dates, local-day aggregates, and
+cron schedules. The timezone returned by geocoding is used only when a caller
+does not supply a timezone explicitly.
+
+### Weather provider settings
+
+```yaml
+providers:
+  weather:
+    forecast_url: https://api.open-meteo.com/v1/forecast
+    geocoding_url: https://geocoding-api.open-meteo.com/v1/search
+    default_location: Moscow
+    timeout: 10s
+    poll_cron: "0 * * * *"
+```
+
+| Field | Description | Default |
+| --- | --- | --- |
+| `forecast_url` | Open-Meteo-compatible forecast endpoint | public Open-Meteo endpoint |
+| `geocoding_url` | Open-Meteo-compatible location search endpoint | public Open-Meteo endpoint |
+| `default_location` | city used when reminder text omits a location | `Moscow` |
+| `timeout` | timeout for each geocoding or forecast request | `10s` |
+| `poll_cron` | default temperature-alert polling schedule in the user's timezone | `"0 * * * *"` |
 
 ## Price monitoring
 

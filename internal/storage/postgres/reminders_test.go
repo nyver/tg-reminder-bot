@@ -69,7 +69,7 @@ func TestReminderRepoRemove(t *testing.T) {
 	}
 }
 
-func TestMarkConditionalDueSkipsDigestReminders(t *testing.T) {
+func TestMarkConditionalDuePreservesScheduledConditionalReminders(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	db, err := New(ctx, "sqlite", filepath.Join(t.TempDir(), "due.db"))
@@ -94,11 +94,19 @@ func TestMarkConditionalDueSkipsDigestReminders(t *testing.T) {
 
 	anchorID := uuid.NewString()
 	digestID := uuid.NewString()
+	weatherID := uuid.NewString()
 	future := time.Date(2026, 7, 17, 9, 0, 0, 0, time.UTC)
 	if _, err := db.ExecContext(ctx,
 		`INSERT INTO reminders (id, kind, spec, status, next_eval_at, locked_at, locked_by)
 		 VALUES (?, 'conditional', '{"trigger":"anchor","event":{"type":"tv_program"}}', 'active', ?, ?, 'old-worker')`,
 		anchorID, future, future,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO reminders (id, kind, spec, status, next_eval_at, locked_at, locked_by)
+		 VALUES (?, 'conditional', '{"trigger":"anchor","event":{"type":"weather"}}', 'active', ?, ?, 'old-worker')`,
+		weatherID, future, future,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -133,6 +141,18 @@ func TestMarkConditionalDueSkipsDigestReminders(t *testing.T) {
 	}
 	if digestLocked.Valid {
 		t.Fatalf("digest locked_by still set: %q", digestLocked.String)
+	}
+
+	var weatherNext time.Time
+	var weatherLocked sql.NullString
+	if err := db.QueryRowContext(ctx, `SELECT next_eval_at, locked_by FROM reminders WHERE id = ?`, weatherID).Scan(&weatherNext, &weatherLocked); err != nil {
+		t.Fatal(err)
+	}
+	if !weatherNext.Equal(future) {
+		t.Fatalf("weather next_eval_at = %v, want unchanged %v", weatherNext, future)
+	}
+	if weatherLocked.Valid {
+		t.Fatalf("weather locked_by still set: %q", weatherLocked.String)
 	}
 }
 

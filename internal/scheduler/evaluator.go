@@ -147,6 +147,13 @@ func (e *Evaluator) evaluateAnchor(ctx context.Context, r domain.Reminder) ([]Pl
 		Params: r.Spec.Event.Params,
 	}, from, to)
 	if err != nil {
+		// Weather anchors may be one-shot (for example, a forecast requested
+		// immediately or a rain check scheduled for tomorrow morning). Return
+		// their error so the watcher schedules a retry instead of marking the
+		// reminder done after a transient outage.
+		if r.Spec.Event.Type == "weather" {
+			return nil, fmt.Errorf("weather lookup: %w", err)
+		}
 		// Transient provider errors (DNS, network, timeouts) are treated as
 		// "no events found this tick" rather than a hard failure.  The watcher
 		// will retry on the next cron tick, which is the desired behaviour for
@@ -488,8 +495,26 @@ func renderAnchorText(spec domain.Spec, ev provider.Event, loc *time.Location) s
 	if spec.Event.Type == "tv_program" {
 		return renderTVProgramText(ev, loc)
 	}
+	if spec.Event.Type == "weather" {
+		return renderWeatherText(ev, loc)
+	}
 	return fmt.Sprintf("🔔 *%s* начинается через %s!\n%s",
 		ev.Title, spec.LeadTime.String(), spec.Message)
+}
+
+func renderWeatherText(ev provider.Event, loc *time.Location) string {
+	date, err := time.ParseInLocation("2006-01-02", ev.Meta["date"], loc)
+	dateText := ev.Meta["date"]
+	if err == nil {
+		dateText = fmt.Sprintf("%d %s", date.Day(), ruMonths[date.Month()-1])
+	}
+	return fmt.Sprintf(
+		"🌤 Прогноз погоды для %s на %s\n%s\nТемпература: %s…%s °C (ощущается как %s…%s °C)\nОсадки: вероятность %s%%, %s мм\nВетер: до %s км/ч",
+		ev.Meta["location"], dateText, ev.Meta["weather"],
+		ev.Meta["temperature_min_c"], ev.Meta["temperature_max_c"],
+		ev.Meta["apparent_temperature_min_c"], ev.Meta["apparent_temperature_max_c"],
+		ev.Meta["precipitation_probability"], ev.Meta["precipitation_mm"], ev.Meta["wind_speed_kmh"],
+	)
 }
 
 var ruMonths = [12]string{
@@ -550,6 +575,25 @@ func renderConditionText(spec domain.Spec, condition domain.Condition, m provide
 		return fmt.Sprintf("📉 Цена снизилась!\n%s\nЦена: *%s*%s\n%s",
 			title, price, delta, spec.Message)
 	}
+	if spec.Event.Type == "weather" {
+		value := formatTemperature(m.Value)
+		var sb strings.Builder
+		sb.WriteString("🌡 Погодное условие выполнено!\n")
+		if location := m.Meta["location"]; location != "" {
+			sb.WriteString(location + "\n")
+		}
+		sb.WriteString("Прогноз температуры: " + value)
+		if period := m.Meta["period"]; period == "night" {
+			sb.WriteString(" ночью")
+		}
+		if date := m.Meta["date"]; date != "" {
+			sb.WriteString(" (" + date + ")")
+		}
+		if spec.Message != "" {
+			sb.WriteString("\n" + spec.Message)
+		}
+		return sb.String()
+	}
 
 	value := formatMetricValue(m.Value, m.Currency)
 	var sb strings.Builder
@@ -565,6 +609,10 @@ func renderConditionText(spec domain.Spec, condition domain.Condition, m provide
 		sb.WriteString("\n" + spec.Message)
 	}
 	return sb.String()
+}
+
+func formatTemperature(value int64) string {
+	return strconv.FormatFloat(float64(value)/10, 'f', 1, 64) + " °C"
 }
 
 func formatMetricValue(value int64, currency string) string {

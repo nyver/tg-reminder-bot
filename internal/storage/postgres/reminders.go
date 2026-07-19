@@ -222,24 +222,28 @@ func (r *ReminderRepo) Remove(ctx context.Context, userID int64, id uuid.UUID) e
 
 // MarkConditionalDue clears stale startup locks for active conditional
 // reminders and resets next_eval_at for reminders that need immediate probing.
-// Digest reminders keep their cron-derived next_eval_at so startup does not
-// send an extra digest.
+// Digest reminders and scheduled weather events keep their next_eval_at so
+// startup does not send an extra digest or an early forecast/alert.
 // Uses the dialect-native NOW() so the stored format matches LeaseDue's comparison.
 func (r *ReminderRepo) MarkConditionalDue(ctx context.Context) error {
 	now := r.db.Now()
 	triggerExpr := `spec->>'trigger'`
+	eventTypeExpr := `spec->'event'->>'type'`
 	if r.db.Dialect == "sqlite" {
 		triggerExpr = `json_extract(spec, '$.trigger')`
+		eventTypeExpr = `json_extract(spec, '$.event.type')`
 	}
 	_, err := r.db.ExecContext(ctx, fmt.Sprintf(
 		`UPDATE reminders
 		 SET next_eval_at=CASE
-		       WHEN COALESCE(%s, '') = 'digest' THEN next_eval_at
+		       WHEN COALESCE(%s, '') = 'digest'
+		         OR (COALESCE(%s, '') = 'anchor' AND COALESCE(%s, '') = 'weather')
+		       THEN next_eval_at
 		       ELSE %s
 		     END,
 		     locked_at=NULL,
 		     locked_by=NULL
-		 WHERE status='active' AND kind='conditional'`, triggerExpr, now))
+		 WHERE status='active' AND kind='conditional'`, triggerExpr, triggerExpr, eventTypeExpr, now))
 	return err
 }
 

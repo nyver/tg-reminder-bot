@@ -401,7 +401,25 @@ func (p *LLMParser) Parse(ctx context.Context, text string, loc *time.Location) 
 		return nil, fmt.Errorf("llm json unmarshal: %w (raw: %.200s)", err, raw)
 	}
 
-	return mapToResult(&resp)
+	result, err := mapToResult(&resp)
+	if err != nil {
+		return nil, err
+	}
+	if result.Spec != nil && result.Spec.Event.Type == "weather" {
+		if result.Spec.Event.Params == nil {
+			result.Spec.Event.Params = make(map[string]string)
+		}
+		if result.Spec.Event.Params["timezone"] == "" {
+			result.Spec.Event.Params["timezone"] = loc.String()
+		}
+		// A scheduled one-shot must keep the date meant at creation time. If
+		// "tomorrow" stayed relative, evaluating it tomorrow morning would ask
+		// the provider for the day after tomorrow.
+		if result.FireAt != nil && result.Spec.Event.Params["day"] == "tomorrow" {
+			result.Spec.Event.Params["day"] = now.AddDate(0, 0, 1).Format("2006-01-02")
+		}
+	}
+	return result, nil
 }
 
 // sanitizeForPrompt заменяет XML-значимые символы в пользовательском тексте,
@@ -431,12 +449,12 @@ func buildPrompt(text string, now time.Time) string {
   top_n       5                               (для digest)
   horizon_days 30                             (для digest/anchor)
   condition.operator lt|lte|gt|gte|changed|changed_pct (для threshold)
-  condition.target 5000000                    (для сравнений; цена в копейках)
+  condition.target 5000000                    (для сравнений; цена в копейках, температура в °C)
   condition.change_percent 10                 (для changed_pct, проценты)
   condition.edge_triggered true|false          (по умолчанию true)
   condition.cooldown "6h"                     (обязательно для edge_triggered=false)
   currency    RUB|USD|EUR                       (если метрика является ценой или курсом)
-  event.type  tv_program|price|rss            (для conditional)
+  event.type  tv_program|price|rss|weather    (для conditional)
   event.title название                        (для tv_program/price)
   event.params {"url":"..."} и т.д. (для rss с несколькими лентами — через запятую: "url1,url2")
   confidence  0.0-1.0                         (обязательно)
@@ -458,12 +476,16 @@ func buildPrompt(text string, now time.Time) string {
 - «каждый день в 18:00 создай дайджест новостей на основе <URL>» → kind=conditional, trigger=digest, event.type=rss, event.params.url=<URL>, eval_cron="0 18 * * *"
 - «дайджест новостей по ленте <URL> топ 10 в 8 утра» → kind=conditional, trigger=digest, event.type=rss, event.params.url=<URL>, top_n=10, eval_cron="0 8 * * *"
 - «дайджест по лентам <URL1> и <URL2> в 9 утра» → kind=conditional, trigger=digest, event.type=rss, event.params.url="<URL1>,<URL2>" (несколько ссылок через запятую — один общий дайджест по всем лентам)
+- «пришли прогноз погоды на сегодня/завтра» → kind=conditional, trigger=anchor, event.type=weather, event.params.day=today|tomorrow, event.params.location=<город, если указан>, event.params.timezone=%s; без eval_cron
+- «каждое утро присылай прогноз на день» → kind=conditional, trigger=anchor, event.type=weather, event.params.day=today, event.params.timezone=%s, eval_cron="0 8 * * *" (или указанное время)
+- «предупреди завтра утром, если будет дождь» → kind=conditional, trigger=anchor, event.type=weather, event.params.day=<завтрашняя дата YYYY-MM-DD>, event.params.condition=rain, event.params.timezone=%s, fire_at=<завтра 08:00 RFC3339>; без eval_cron
+- «уведоми, если ночью ожидается ниже -10» → kind=conditional, trigger=threshold, event.type=weather, event.params.day=next_night, event.params.period=night, event.params.timezone=%s, condition.operator=lt, condition.target=-10, condition.edge_triggered=false, condition.cooldown="24h"
 - horizon_days: «неделя»→7, «месяц»→30, «2 недели»→14, default→30
 - confidence: 0.9+ ясно, 0.5-0.9 допущения, <0.5 неясно
 
 <user_request>
 %s
-</user_request>`, now.Format("02 Jan 2006 15:04 MST -07:00"), now.Location().String(), sanitizeForPrompt(text))
+</user_request>`, now.Format("02 Jan 2006 15:04 MST -07:00"), now.Location().String(), now.Location().String(), now.Location().String(), now.Location().String(), now.Location().String(), sanitizeForPrompt(text))
 }
 
 func extractText(msg *anthropic.Message) string {
@@ -533,6 +555,13 @@ func mapToResult(resp *llmResponse) (*ParseResult, error) {
 			ChangePercent: resp.Condition.ChangePercent,
 			EdgeTriggered: edgeTriggered,
 		}
+		if resp.Event.Type == "weather" && condition.Target != nil {
+			if *condition.Target < -100 || *condition.Target > 100 {
+				return nil, fmt.Errorf("weather temperature target is out of range")
+			}
+			tenths := *condition.Target * 10
+			condition.Target = &tenths
+		}
 		if resp.Condition.Cooldown != "" {
 			cooldown, err := time.ParseDuration(resp.Condition.Cooldown)
 			if err != nil {
@@ -558,6 +587,12 @@ func mapToResult(resp *llmResponse) (*ParseResult, error) {
 			spec.Trigger = domain.TriggerAnchor
 		case "rss":
 			spec.Trigger = domain.TriggerDigest
+		case "weather":
+			if spec.Condition != nil {
+				spec.Trigger = domain.TriggerThreshold
+			} else {
+				spec.Trigger = domain.TriggerAnchor
+			}
 		}
 	}
 

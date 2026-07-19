@@ -20,6 +20,61 @@ type userServiceStub struct {
 	err  error
 }
 
+func TestBuildReminderSchedulesWeatherModes(t *testing.T) {
+	now := time.Date(2026, 7, 19, 10, 0, 0, 0, time.UTC)
+	baseSpec := &domain.Spec{
+		Trigger: domain.TriggerAnchor,
+		Event: domain.EventSpec{Type: "weather", Params: map[string]string{
+			"day": "today", "timezone": "UTC",
+		}},
+	}
+
+	immediate, err := buildReminder(42, "прогноз сегодня", &nlu.ParseResult{
+		Kind: domain.KindConditional, Spec: baseSpec, Confidence: 0.9,
+	}, now, "UTC")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if immediate.EvalCron != "" || immediate.NextEvalAt == nil || !immediate.NextEvalAt.Equal(now) {
+		t.Fatalf("immediate reminder = %+v", immediate)
+	}
+
+	fireAt := now.Add(22 * time.Hour).Format(time.RFC3339)
+	scheduled, err := buildReminder(42, "дождь завтра", &nlu.ParseResult{
+		Kind: domain.KindConditional, Spec: baseSpec, Confidence: 0.9, FireAt: &fireAt,
+	}, now, "UTC")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantFire, _ := time.Parse(time.RFC3339, fireAt)
+	if scheduled.EvalCron != "" || scheduled.NextEvalAt == nil || !scheduled.NextEvalAt.Equal(wantFire) {
+		t.Fatalf("scheduled reminder = %+v", scheduled)
+	}
+
+	recurring, err := buildReminder(42, "прогноз каждое утро", &nlu.ParseResult{
+		Kind: domain.KindConditional, Spec: baseSpec, Confidence: 0.9, EvalCron: "0 8 * * *",
+	}, now, "UTC")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recurring.EvalCron != "0 8 * * *" || recurring.NextEvalAt == nil || !recurring.NextEvalAt.After(now) {
+		t.Fatalf("recurring reminder = %+v", recurring)
+	}
+}
+
+func TestApplyWeatherDefaultsAddsConfiguredLocation(t *testing.T) {
+	result := &nlu.ParseResult{Spec: &domain.Spec{Event: domain.EventSpec{Type: "weather"}}}
+	applyWeatherDefaults(result, "Moscow")
+	if got := result.Spec.Event.Params["location"]; got != "Moscow" {
+		t.Fatalf("location = %q", got)
+	}
+	result.Spec.Event.Params["location"] = "Казань"
+	applyWeatherDefaults(result, "Moscow")
+	if got := result.Spec.Event.Params["location"]; got != "Казань" {
+		t.Fatalf("explicit location was overwritten: %q", got)
+	}
+}
+
 func (s userServiceStub) GetOrCreate(context.Context, int64) (*domain.User, error) {
 	return s.user, s.err
 }
@@ -451,6 +506,26 @@ func TestFormatSpecShowsLevelConditionAndCooldown(t *testing.T) {
 	}
 	got := formatSpec(spec)
 	for _, want := range []string{"50 000", "Повторять", "1 день"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("formatSpec() = %q, want substring %q", got, want)
+		}
+	}
+}
+
+func TestFormatSpecShowsWeatherThresholdContext(t *testing.T) {
+	target := int64(-100)
+	spec := &domain.Spec{
+		Trigger: domain.TriggerThreshold,
+		Condition: &domain.Condition{
+			Operator: domain.ConditionOperatorLT, Target: &target,
+			Cooldown: domain.Duration{Duration: 24 * time.Hour},
+		},
+		Event: domain.EventSpec{Type: "weather", Params: map[string]string{
+			"location": "Казань", "day": "next_night", "period": "night",
+		}},
+	}
+	got := formatSpec(spec)
+	for _, want := range []string{"Казань", "ближайшая ночь", "\\-10\\.0 °C"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("formatSpec() = %q, want substring %q", got, want)
 		}

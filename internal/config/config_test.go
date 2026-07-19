@@ -32,6 +32,9 @@ func TestLoadYAMLUsesSQLiteDefaults(t *testing.T) {
 	if cfg.NLU.OpenRouter.Timeout != 30*time.Second {
 		t.Fatalf("openrouter timeout = %s, want 30s", cfg.NLU.OpenRouter.Timeout)
 	}
+	if cfg.Providers.Weather.DefaultLocation != "Moscow" || cfg.Providers.Weather.PollCron != "0 * * * *" {
+		t.Fatalf("unexpected weather config: %+v", cfg.Providers.Weather)
+	}
 }
 
 func TestValidateRejectsInvalidProxyURLs(t *testing.T) {
@@ -79,6 +82,28 @@ func TestValidateRejectsInvalidPriceCron(t *testing.T) {
 
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected validation error")
+	}
+}
+
+func TestValidateRejectsInvalidWeatherConfig(t *testing.T) {
+	tests := []struct {
+		name  string
+		apply func(*Config)
+	}{
+		{"empty location", func(c *Config) { c.Providers.Weather.DefaultLocation = "" }},
+		{"invalid forecast URL", func(c *Config) { c.Providers.Weather.ForecastURL = "file:///tmp/forecast" }},
+		{"invalid geocoding URL", func(c *Config) { c.Providers.Weather.GeocodingURL = "://bad" }},
+		{"invalid poll cron", func(c *Config) { c.Providers.Weather.PollCron = "sometimes" }},
+		{"invalid timeout", func(c *Config) { c.Providers.Weather.Timeout = 0 }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := defaults()
+			test.apply(cfg)
+			if err := cfg.Validate(); err == nil {
+				t.Fatal("expected validation error")
+			}
+		})
 	}
 }
 

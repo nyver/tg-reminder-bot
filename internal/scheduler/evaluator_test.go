@@ -19,6 +19,8 @@ type eventProviderFunc func(context.Context, provider.Query, time.Time, time.Tim
 type metricProviderFunc func(context.Context, provider.Query) (provider.Measurement, error)
 
 type temperatureMetricProviderFunc func(context.Context, provider.Query) (provider.Measurement, error)
+type weatherEventProviderFunc func(context.Context, provider.Query, time.Time, time.Time) ([]provider.Event, error)
+type weatherMetricProviderFunc func(context.Context, provider.Query) (provider.Measurement, error)
 
 func (eventProviderFunc) Type() string { return "tv_program" }
 
@@ -35,6 +37,18 @@ func (f metricProviderFunc) Sample(ctx context.Context, q provider.Query) (provi
 func (temperatureMetricProviderFunc) Type() string { return "temperature" }
 
 func (f temperatureMetricProviderFunc) Sample(ctx context.Context, q provider.Query) (provider.Measurement, error) {
+	return f(ctx, q)
+}
+
+func (weatherEventProviderFunc) Type() string { return "weather" }
+
+func (f weatherEventProviderFunc) Lookup(ctx context.Context, q provider.Query, from, to time.Time) ([]provider.Event, error) {
+	return f(ctx, q, from, to)
+}
+
+func (weatherMetricProviderFunc) Type() string { return "weather" }
+
+func (f weatherMetricProviderFunc) Sample(ctx context.Context, q provider.Query) (provider.Measurement, error) {
 	return f(ctx, q)
 }
 
@@ -86,6 +100,59 @@ func TestAnchorNotifiesImmediatelyWhenLeadTimeWasMissed(t *testing.T) {
 	}
 }
 
+func TestWeatherEventRendersForecast(t *testing.T) {
+	now := time.Date(2026, 7, 19, 8, 0, 0, 0, time.UTC)
+	registry := provider.NewRegistry()
+	registry.RegisterEvent(weatherEventProviderFunc(func(context.Context, provider.Query, time.Time, time.Time) ([]provider.Event, error) {
+		return []provider.Event{{
+			Identity: "weather:1", Title: "Прогноз", AnchorAt: now.Add(time.Second),
+			Meta: map[string]string{
+				"location": "Москва, Россия", "date": "2026-07-19", "weather": "дождь",
+				"temperature_min_c": "12.3", "temperature_max_c": "18.4",
+				"apparent_temperature_min_c": "11.0", "apparent_temperature_max_c": "17.2",
+				"precipitation_probability": "80.0", "precipitation_mm": "4.2", "wind_speed_kmh": "16.0",
+			},
+		}}, nil
+	}))
+	evaluator := NewEvaluator(registry, nil, clock.NewFake(now), 180, nil)
+	planned, err := evaluator.Evaluate(context.Background(), domain.Reminder{
+		ID: uuid.New(), UserID: 42, UserTZ: "UTC", Kind: domain.KindConditional,
+		Spec: domain.Spec{Trigger: domain.TriggerAnchor, Event: domain.EventSpec{Type: "weather"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(planned) != 1 || !strings.Contains(planned[0].Text, "12.3…18.4 °C") || !strings.Contains(planned[0].Text, "80.0%") {
+		t.Fatalf("planned = %+v", planned)
+	}
+}
+
+func TestWeatherThresholdRendersCelsius(t *testing.T) {
+	now := time.Date(2026, 7, 19, 8, 0, 0, 0, time.UTC)
+	registry := provider.NewRegistry()
+	registry.RegisterMetric(weatherMetricProviderFunc(func(context.Context, provider.Query) (provider.Measurement, error) {
+		return provider.Measurement{Value: -124, Available: true, Meta: map[string]string{
+			"location": "Москва, Россия", "date": "2026-07-20", "period": "night",
+		}}, nil
+	}))
+	target := int64(-100)
+	evaluator := NewEvaluator(registry, &fixedHistory{}, clock.NewFake(now), 180, nil)
+	planned, err := evaluator.Evaluate(context.Background(), domain.Reminder{
+		ID: uuid.New(), UserID: 42, Kind: domain.KindConditional,
+		Spec: domain.Spec{
+			Trigger:   domain.TriggerThreshold,
+			Condition: &domain.Condition{Operator: domain.ConditionOperatorLT, Target: &target, Cooldown: domain.Duration{Duration: 24 * time.Hour}},
+			Event:     domain.EventSpec{Type: "weather"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(planned) != 1 || !strings.Contains(planned[0].Text, "-12.4 °C") || !strings.Contains(planned[0].Text, "ночью") {
+		t.Fatalf("planned = %+v", planned)
+	}
+}
+
 func TestAnchorTransientErrorReturnsNil(t *testing.T) {
 	now := time.Date(2026, 6, 21, 17, 30, 0, 0, time.FixedZone("MSK", 3*60*60))
 	registry := provider.NewRegistry()
@@ -108,6 +175,22 @@ func TestAnchorTransientErrorReturnsNil(t *testing.T) {
 	}
 	if len(planned) != 0 {
 		t.Fatalf("expected no notifications on transient error, got %+v", planned)
+	}
+}
+
+func TestWeatherAnchorErrorRequestsRetry(t *testing.T) {
+	now := time.Date(2026, 7, 19, 8, 0, 0, 0, time.UTC)
+	registry := provider.NewRegistry()
+	registry.RegisterEvent(weatherEventProviderFunc(func(context.Context, provider.Query, time.Time, time.Time) ([]provider.Event, error) {
+		return nil, &netError{temporary: true}
+	}))
+	evaluator := NewEvaluator(registry, nil, clock.NewFake(now), 180, nil)
+	_, err := evaluator.Evaluate(context.Background(), domain.Reminder{
+		ID: uuid.New(), Kind: domain.KindConditional,
+		Spec: domain.Spec{Trigger: domain.TriggerAnchor, Event: domain.EventSpec{Type: "weather"}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "weather lookup") {
+		t.Fatalf("error = %v", err)
 	}
 }
 

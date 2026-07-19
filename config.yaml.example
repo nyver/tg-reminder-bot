@@ -121,6 +121,19 @@ providers:
     # Empty value — fetch directly, no proxy.
     proxy_url: ""
 
+  weather:
+    # Open-Meteo public endpoints. No API key is required for non-commercial use.
+    # These URLs may point to a self-hosted Open-Meteo installation instead.
+    forecast_url: https://api.open-meteo.com/v1/forecast
+    geocoding_url: https://geocoding-api.open-meteo.com/v1/search
+    # Used when the reminder text does not name a city.
+    default_location: Moscow
+    # Deadline for one geocoding or forecast request.
+    timeout: 10s
+    # Default check schedule for forecast-based temperature alerts.
+    # Five-field cron syntax, interpreted in the user's timezone.
+    poll_cron: "0 * * * *"
+
 scheduler:
   # Cron times are interpreted in each user's timezone configured via /tz.
   # The VPS or container timezone does not affect reminder delivery.

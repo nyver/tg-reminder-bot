@@ -50,16 +50,18 @@ type PriceProber interface {
 }
 
 type Handler struct {
-	reminders            ReminderService
-	users                UserService
-	dialogs              DialogStore
-	parser               nlu.Parser
-	prices               PriceProber          // optional
-	history              PriceHistory         // optional, for /refresh delta
-	schedule             provider.TVScheduler // optional
-	evaluator            *scheduler.Evaluator // optional, for /run
-	priceDefaultPollCron string
-	log                  *slog.Logger
+	reminders              ReminderService
+	users                  UserService
+	dialogs                DialogStore
+	parser                 nlu.Parser
+	prices                 PriceProber          // optional
+	history                PriceHistory         // optional, for /refresh delta
+	schedule               provider.TVScheduler // optional
+	evaluator              *scheduler.Evaluator // optional, for /run
+	priceDefaultPollCron   string
+	weatherDefaultPollCron string
+	weatherDefaultLocation string
+	log                    *slog.Logger
 }
 
 func NewHandler(
@@ -72,19 +74,23 @@ func NewHandler(
 	schedule provider.TVScheduler,
 	evaluator *scheduler.Evaluator,
 	priceDefaultPollCron string,
+	weatherDefaultPollCron string,
+	weatherDefaultLocation string,
 	log *slog.Logger,
 ) *Handler {
 	return &Handler{
-		reminders:            reminders,
-		users:                users,
-		dialogs:              dialogs,
-		parser:               parser,
-		prices:               prices,
-		history:              history,
-		schedule:             schedule,
-		evaluator:            evaluator,
-		priceDefaultPollCron: priceDefaultPollCron,
-		log:                  log,
+		reminders:              reminders,
+		users:                  users,
+		dialogs:                dialogs,
+		parser:                 parser,
+		prices:                 prices,
+		history:                history,
+		schedule:               schedule,
+		evaluator:              evaluator,
+		priceDefaultPollCron:   priceDefaultPollCron,
+		weatherDefaultPollCron: weatherDefaultPollCron,
+		weatherDefaultLocation: weatherDefaultLocation,
+		log:                    log,
 	}
 }
 
@@ -1073,9 +1079,14 @@ func (h *Handler) continueParsing(ctx context.Context, c tele.Context, userID in
 }
 
 func (h *Handler) askConfirmation(ctx context.Context, c tele.Context, userID int64, rawText string, result *nlu.ParseResult, userTZ string) error {
+	applyWeatherDefaults(result, h.weatherDefaultLocation)
 	evalCron := result.EvalCron
 	if evalCron == "" && result.Spec != nil && result.Spec.Trigger == domain.TriggerThreshold {
-		evalCron = h.priceDefaultPollCron
+		if result.Spec.Event.Type == "weather" {
+			evalCron = h.weatherDefaultPollCron
+		} else {
+			evalCron = h.priceDefaultPollCron
+		}
 	}
 	ctxData := &DialogContext{
 		RawText:    rawText,
@@ -1107,6 +1118,18 @@ func (h *Handler) askConfirmation(ctx context.Context, c tele.Context, userID in
 		),
 	)
 	return c.Send(confirmMsg, menu, tele.ModeMarkdownV2)
+}
+
+func applyWeatherDefaults(result *nlu.ParseResult, defaultLocation string) {
+	if result == nil || result.Spec == nil || result.Spec.Event.Type != "weather" {
+		return
+	}
+	if result.Spec.Event.Params == nil {
+		result.Spec.Event.Params = make(map[string]string)
+	}
+	if result.Spec.Event.Params["location"] == "" {
+		result.Spec.Event.Params["location"] = defaultLocation
+	}
 }
 
 // formatConfirmSpec builds the human-readable spec block for the confirmation
@@ -1447,6 +1470,26 @@ func buildReminder(userID int64, rawText string, result *nlu.ParseResult, now ti
 		rem.NextEvalAt = &next
 	case domain.KindConditional:
 		rem.EvalCron = result.EvalCron
+		if result.Spec.Event.Type == "weather" && result.FireAt != nil {
+			fireAt, err := time.Parse(time.RFC3339, *result.FireAt)
+			if err != nil {
+				return nil, fmt.Errorf("parse weather fire_at: %w", err)
+			}
+			rem.NextEvalAt = &fireAt
+			break
+		}
+		if result.Spec.Event.Type == "weather" && result.Spec.Trigger == domain.TriggerAnchor && rem.EvalCron != "" {
+			next, err := nextCronAt(rem.EvalCron, now, userTZ)
+			if err != nil {
+				return nil, err
+			}
+			rem.NextEvalAt = &next
+			break
+		}
+		if result.Spec.Event.Type == "weather" && result.Spec.Trigger == domain.TriggerAnchor && rem.EvalCron == "" {
+			rem.NextEvalAt = PtrTime(now.UTC())
+			break
+		}
 		if rem.EvalCron == "" {
 			rem.EvalCron = defaultConditionalCron
 		}
@@ -1571,6 +1614,21 @@ func validateParseResult(result *nlu.ParseResult) error {
 			if n := strings.Count(u, ",") + 1; n > rssMaxURLs {
 				return fmt.Errorf("rss reminder has too many feed URLs (%d, max %d)", n, rssMaxURLs)
 			}
+		case "weather":
+			if result.Spec.Trigger != domain.TriggerAnchor && result.Spec.Trigger != domain.TriggerThreshold {
+				return fmt.Errorf("weather reminder requires anchor or threshold trigger")
+			}
+			if result.Spec.Trigger == domain.TriggerThreshold && result.Spec.Condition == nil {
+				return fmt.Errorf("weather threshold reminder requires a condition")
+			}
+			if condition := result.Spec.Condition; condition != nil && condition.Target != nil && (*condition.Target < -1000 || *condition.Target > 1000) {
+				return fmt.Errorf("weather temperature target is out of range")
+			}
+			if day := result.Spec.Event.Params["day"]; day != "" && day != "today" && day != "tomorrow" && day != "next_night" {
+				if _, err := time.Parse("2006-01-02", day); err != nil {
+					return fmt.Errorf("invalid weather day %q", day)
+				}
+			}
 		default:
 			if result.Spec.Event.Title == "" {
 				return fmt.Errorf("conditional reminder is incomplete")
@@ -1647,6 +1705,20 @@ func formatSpec(spec *domain.Spec) string {
 	}
 	switch spec.Trigger {
 	case domain.TriggerAnchor:
+		if spec.Event.Type == "weather" {
+			location := spec.Event.Params["location"]
+			if location == "" {
+				location = "город по умолчанию"
+			}
+			sb.WriteString("📍 " + escapeMarkdown(location) + "\n")
+			if day := spec.Event.Params["day"]; day != "" {
+				sb.WriteString("📅 " + escapeMarkdown(weatherDayDescription(day)) + "\n")
+			}
+			if spec.Event.Params["condition"] == "rain" {
+				sb.WriteString("🌧 Прислать только если ожидается дождь\n")
+			}
+			break
+		}
 		if ch := spec.Event.Params["channel"]; ch != "" {
 			sb.WriteString("📺 " + escapeMarkdown(ch) + "\n")
 		}
@@ -1656,6 +1728,16 @@ func formatSpec(spec *domain.Spec) string {
 	case domain.TriggerThreshold:
 		if u := spec.Event.Params["url"]; u != "" {
 			sb.WriteString("🔗 " + escapeMarkdown(u) + "\n")
+		}
+		if spec.Event.Type == "weather" {
+			location := spec.Event.Params["location"]
+			if location == "" {
+				location = "город по умолчанию"
+			}
+			sb.WriteString("📍 " + escapeMarkdown(location) + "\n")
+			if day := spec.Event.Params["day"]; day != "" {
+				sb.WriteString("📅 " + escapeMarkdown(weatherDayDescription(day)) + "\n")
+			}
 		}
 		sb.WriteString("🔔 " + escapeMarkdown(metricConditionDescription(spec)) + "\n")
 		appendConditionMode(&sb, spec)
@@ -1693,6 +1775,8 @@ func metricConditionDescription(spec *domain.Spec) string {
 	if condition.Target != nil {
 		if spec.Event.Type == "price" {
 			reference = formatPriceRub(*condition.Target, spec.Currency)
+		} else if spec.Event.Type == "weather" {
+			reference = strconv.FormatFloat(float64(*condition.Target)/10, 'f', 1, 64) + " °C"
 		} else {
 			reference = strconv.FormatInt(*condition.Target, 10)
 		}
@@ -1717,6 +1801,19 @@ func metricConditionDescription(spec *domain.Spec) string {
 		return "Значение изменилось"
 	default:
 		return "Условие метрики выполнено"
+	}
+}
+
+func weatherDayDescription(day string) string {
+	switch day {
+	case "today":
+		return "сегодня"
+	case "tomorrow":
+		return "завтра"
+	case "next_night":
+		return "ближайшая ночь"
+	default:
+		return day
 	}
 }
 
@@ -1846,6 +1943,7 @@ const msgWelcome = `*Привет! Я бот напоминаний.*
 • «напомни завтра в 9:00 позвонить маме»
 • «каждый будний день в 9:00 напоминай выпить таблетку»
 • «уведоми при снижении цены: https://example.com/product»
+• «каждое утро присылай прогноз погоды на день»
 
 /tv — расписание TV программ
 /rss — ежедневный RSS-дайджест
@@ -1857,7 +1955,8 @@ const msgEmptyList = `У вас пока нет активных напомин�
 Напишите мне обычной фразой, например:
 • «напомни завтра в 9:00 позвонить маме»
 • «каждый понедельник в 8:30 напоминай про совещание»
-• «уведоми при снижении цены: https://example.com/product»`
+• «уведоми при снижении цены: https://example.com/product»
+• «пришли прогноз погоды на завтра»`
 
 const msgParseFailed = `Не удалось распознать напоминание.
 
@@ -1895,4 +1994,8 @@ const msgHelp = `*Что можно сделать*
 • «уведоми за 1 неделю до КВН на Первом»
 • «вот ссылка на товар — уведоми при снижении цены»
 • «вот ссылка — уведоми при снижении цены каждые 4 часа»
-• «каждый день в 18:00 создай дайджест новостей на основе https://lenta.ru/rss»`
+• «каждый день в 18:00 создай дайджест новостей на основе https://lenta.ru/rss»
+• «предупреди завтра утром, если будет дождь»
+• «уведоми, если ночью ожидается ниже -10»
+• «каждое утро присылай прогноз погоды на день»
+• «пришли прогноз погоды на сегодня»`

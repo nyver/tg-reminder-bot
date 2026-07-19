@@ -54,6 +54,11 @@ var (
 	reRSSDigestKeyword = regexp.MustCompile(`(?i)дайджест`)
 	reHHMM             = regexp.MustCompile(`\b([01]?\d|2[0-3])[:.]([0-5]\d)\b`)
 	reTopN             = regexp.MustCompile(`(?i)топ[- ]?(\d+)|(\d+)\s+новост`)
+	reWeatherKeyword   = regexp.MustCompile(`(?i)погод|прогноз|дожд|температур|градус|ночью?`)
+	reWeatherForecast  = regexp.MustCompile(`(?i)прогноз(?:\s+погод[ыа])?|погод[уа]\s+на\s+(?:сегодня|завтра)`)
+	reWeatherRain      = regexp.MustCompile(`(?i)дожд`)
+	reWeatherThreshold = regexp.MustCompile(`(?i)(ниже|меньше|выше|больше)\s+(?:чем\s+)?(-?\d+)`)
+	reWeatherCity      = regexp.MustCompile(`(?i)(?:в|для)\s+город(?:е|а)?\s+([\p{L}-]+(?:\s+[\p{L}-]+)?)`)
 )
 
 func (p *FastPath) Parse(ctx context.Context, text string, loc *time.Location) (*ParseResult, error) {
@@ -62,6 +67,9 @@ func (p *FastPath) Parse(ctx context.Context, text string, loc *time.Location) (
 	}
 	text = strings.TrimSpace(text)
 
+	if r := parseWeather(text, loc); r != nil {
+		return r, nil
+	}
 	if m := reTVAnchor.FindStringSubmatch(text); m != nil {
 		return p.parseTVAnchor(m), nil
 	}
@@ -78,6 +86,109 @@ func (p *FastPath) Parse(ctx context.Context, text string, loc *time.Location) (
 		return p.parseAbsolute(m, loc), nil
 	}
 	return &ParseResult{Spec: &domain.Spec{}, Confidence: 0}, nil
+}
+
+func parseWeather(text string, loc *time.Location) *ParseResult {
+	if !reWeatherKeyword.MatchString(text) {
+		return nil
+	}
+	lower := strings.ToLower(text)
+	params := map[string]string{"timezone": loc.String()}
+	if city := extractWeatherCity(text); city != "" {
+		params["location"] = city
+	}
+
+	if threshold := reWeatherThreshold.FindStringSubmatch(text); threshold != nil &&
+		(strings.Contains(lower, "ноч") || strings.Contains(lower, "температур") || strings.Contains(lower, "градус")) {
+		degrees, err := strconv.ParseInt(threshold[2], 10, 64)
+		if err != nil || degrees < -100 || degrees > 100 {
+			return nil
+		}
+		operator := domain.ConditionOperatorLT
+		direction := strings.ToLower(threshold[1])
+		if direction == "выше" || direction == "больше" {
+			operator = domain.ConditionOperatorGT
+		}
+		target := degrees * 10 // Weather metrics store tenths of a degree Celsius.
+		params["day"] = "today"
+		if strings.Contains(lower, "ноч") {
+			params["day"] = "next_night"
+			params["period"] = "night"
+		}
+		return &ParseResult{
+			Kind: domain.KindConditional,
+			Spec: &domain.Spec{
+				Trigger: domain.TriggerThreshold,
+				Message: strings.TrimSpace(text),
+				Condition: &domain.Condition{
+					Operator: operator, Target: &target, EdgeTriggered: false,
+					Cooldown: domain.Duration{Duration: 24 * time.Hour},
+				},
+				Event: domain.EventSpec{Type: "weather", Params: params},
+			},
+			Confidence: 0.96,
+		}
+	}
+
+	if reWeatherRain.MatchString(text) && strings.Contains(lower, "если") {
+		params["condition"] = "rain"
+		now := time.Now().In(loc)
+		day := now
+		if strings.Contains(lower, "завтра") {
+			day = day.AddDate(0, 0, 1)
+		}
+		params["day"] = day.Format("2006-01-02")
+		hour, minute := 8, 0
+		if match := reHHMM.FindStringSubmatch(text); match != nil {
+			hour, _ = strconv.Atoi(match[1])
+			minute, _ = strconv.Atoi(match[2])
+		}
+		fireAt := time.Date(day.Year(), day.Month(), day.Day(), hour, minute, 0, 0, loc).Format(time.RFC3339)
+		return &ParseResult{
+			Kind: domain.KindConditional,
+			Spec: &domain.Spec{
+				Trigger: domain.TriggerAnchor,
+				Message: strings.TrimSpace(text),
+				Event:   domain.EventSpec{Type: "weather", Params: params},
+			},
+			FireAt:     &fireAt,
+			Confidence: 0.97,
+		}
+	}
+
+	if reWeatherForecast.MatchString(text) {
+		params["day"] = "today"
+		if strings.Contains(lower, "завтра") {
+			params["day"] = "tomorrow"
+		}
+		cron := ""
+		if strings.Contains(lower, "кажд") && strings.Contains(lower, "утр") {
+			cron = "0 8 * * *"
+			if match := reHHMM.FindStringSubmatch(text); match != nil {
+				hour, _ := strconv.Atoi(match[1])
+				minute, _ := strconv.Atoi(match[2])
+				cron = fmt.Sprintf("%d %d * * *", minute, hour)
+			}
+		}
+		return &ParseResult{
+			Kind:     domain.KindConditional,
+			EvalCron: cron,
+			Spec: &domain.Spec{
+				Trigger: domain.TriggerAnchor,
+				Message: strings.TrimSpace(text),
+				Event:   domain.EventSpec{Type: "weather", Params: params},
+			},
+			Confidence: 0.96,
+		}
+	}
+	return nil
+}
+
+func extractWeatherCity(text string) string {
+	if match := reWeatherCity.FindStringSubmatch(text); match != nil {
+		return strings.TrimSpace(match[1])
+	}
+	return ""
 }
 
 // rssDigestMaxURLs bounds how many feeds a free-text digest request can

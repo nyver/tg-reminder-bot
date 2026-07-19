@@ -37,6 +37,23 @@ func TestLLMParserUsesRequestLocationInPrompt(t *testing.T) {
 	}
 }
 
+func TestLLMParserNormalizesScheduledWeatherContext(t *testing.T) {
+	loc := time.FixedZone("MSK", 3*60*60)
+	parser := &LLMParser{complete: func(context.Context, string) (string, error) {
+		return `{"kind":"conditional","trigger":"anchor","message":"дождь","fire_at":"2026-07-20T08:00:00+03:00","event":{"type":"weather","params":{"day":"tomorrow","condition":"rain"}},"confidence":0.95}`, nil
+	}}
+	result, err := parser.Parse(context.Background(), "дождь завтра", loc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Spec.Event.Params["timezone"] != loc.String() {
+		t.Fatalf("timezone = %q", result.Spec.Event.Params["timezone"])
+	}
+	if result.Spec.Event.Params["day"] == "tomorrow" {
+		t.Fatal("scheduled weather day was not converted to an absolute date")
+	}
+}
+
 // TestOpenRouterParser_fallbackOn429 verifies that a 429 from the primary model
 // causes an immediate switch to the fallback model (no delay, no retry of primary).
 func TestOpenRouterParser_fallbackOn429(t *testing.T) {

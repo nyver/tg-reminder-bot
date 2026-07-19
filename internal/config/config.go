@@ -50,11 +50,12 @@ type OpenRouterConfig struct {
 }
 
 type ProvidersConfig struct {
-	TV     TVConfig     `yaml:"tv"`
-	IPTVX  IPTVXConfig  `yaml:"iptvx"`
-	Price  PriceConfig  `yaml:"price"`
-	Travel TravelConfig `yaml:"travel"`
-	RSS    RSSConfig    `yaml:"rss"`
+	TV      TVConfig      `yaml:"tv"`
+	IPTVX   IPTVXConfig   `yaml:"iptvx"`
+	Price   PriceConfig   `yaml:"price"`
+	Travel  TravelConfig  `yaml:"travel"`
+	RSS     RSSConfig     `yaml:"rss"`
+	Weather WeatherConfig `yaml:"weather"`
 }
 
 type TVConfig struct {
@@ -99,6 +100,18 @@ type RSSConfig struct {
 	// Some feeds block requests from datacenter/VPS IP ranges outright; a
 	// proxy is the only way to reach those. Empty means fetch directly.
 	ProxyURL string `yaml:"proxy_url"`
+}
+
+type WeatherConfig struct {
+	// ForecastURL and GeocodingURL are configurable to support self-hosted
+	// Open-Meteo installations. Both must use HTTP(S).
+	ForecastURL  string `yaml:"forecast_url"`
+	GeocodingURL string `yaml:"geocoding_url"`
+	// DefaultLocation is used when a reminder does not name a city.
+	DefaultLocation string        `yaml:"default_location"`
+	Timeout         time.Duration `yaml:"timeout"`
+	// PollCron is the default schedule for forecast-based temperature alerts.
+	PollCron string `yaml:"poll_cron"`
 }
 
 type SchedulerConfig struct {
@@ -203,6 +216,13 @@ func defaults() *Config {
 			},
 			RSS: RSSConfig{
 				Timeout: 15 * time.Second,
+			},
+			Weather: WeatherConfig{
+				ForecastURL:     "https://api.open-meteo.com/v1/forecast",
+				GeocodingURL:    "https://geocoding-api.open-meteo.com/v1/search",
+				DefaultLocation: "Moscow",
+				Timeout:         10 * time.Second,
+				PollCron:        "0 * * * *",
 			},
 		},
 		Scheduler: SchedulerConfig{
@@ -321,6 +341,27 @@ func (cfg *Config) Validate() error {
 	}
 	if err := validateProxyURL(cfg.Providers.RSS.ProxyURL); err != nil {
 		return fmt.Errorf("config: providers.rss.proxy_url: %w", err)
+	}
+	if cfg.Providers.Weather.Timeout <= 0 {
+		return fmt.Errorf("config: providers.weather.timeout must be positive")
+	}
+	if strings.TrimSpace(cfg.Providers.Weather.DefaultLocation) == "" {
+		return fmt.Errorf("config: providers.weather.default_location is required")
+	}
+	for name, rawURL := range map[string]string{
+		"forecast_url":  cfg.Providers.Weather.ForecastURL,
+		"geocoding_url": cfg.Providers.Weather.GeocodingURL,
+	} {
+		parsed, err := url.ParseRequestURI(rawURL)
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+			return fmt.Errorf("config: providers.weather.%s must be an HTTP(S) URL", name)
+		}
+	}
+	if strings.TrimSpace(cfg.Providers.Weather.PollCron) == "" {
+		return fmt.Errorf("config: providers.weather.poll_cron is required")
+	}
+	if _, err := parser.Parse(cfg.Providers.Weather.PollCron); err != nil {
+		return fmt.Errorf("config: providers.weather.poll_cron: %w", err)
 	}
 	return nil
 }

@@ -17,6 +17,7 @@ import (
 	"github.com/nyver2k/remindertgbot/internal/provider/rss"
 	"github.com/nyver2k/remindertgbot/internal/provider/travel"
 	"github.com/nyver2k/remindertgbot/internal/provider/tvschedule"
+	"github.com/nyver2k/remindertgbot/internal/provider/weather"
 	"github.com/nyver2k/remindertgbot/internal/scheduler"
 	"github.com/nyver2k/remindertgbot/internal/storage/postgres"
 	"github.com/nyver2k/remindertgbot/internal/telegram"
@@ -95,6 +96,18 @@ func main() {
 		os.Exit(1)
 	}
 	registry.RegisterNews(rssProvider)
+	weatherProvider, err := weather.New(weather.Config{
+		ForecastURL:     cfg.Providers.Weather.ForecastURL,
+		GeocodingURL:    cfg.Providers.Weather.GeocodingURL,
+		DefaultLocation: cfg.Providers.Weather.DefaultLocation,
+		Timeout:         cfg.Providers.Weather.Timeout,
+	})
+	if err != nil {
+		log.Error("weather provider init", "err", err)
+		os.Exit(1)
+	}
+	registry.RegisterEvent(weatherProvider)
+	registry.RegisterMetric(weatherProvider)
 
 	evaluator := scheduler.NewEvaluator(registry, observationRepo, clock.Real(), cfg.Providers.Travel.MaxHorizonDays, log)
 	if cfg.Providers.RSS.LLMDigest {
@@ -116,6 +129,8 @@ func main() {
 		tvScheduler,
 		evaluator,
 		cfg.Providers.Price.PollCron,
+		cfg.Providers.Weather.PollCron,
+		cfg.Providers.Weather.DefaultLocation,
 		log,
 	)
 
