@@ -43,10 +43,13 @@ Thumbs.db
 .agents/
 .codex/
 
-reminder-bot-spec.md
-reminder-bot-roadmap.md
+*-spec.md
+*-roadmap.md
 promt.txt
 .history
 epg-service-api-1.json
 .qwen
+
+AGENTS.md
+CLAUDE.md
 
