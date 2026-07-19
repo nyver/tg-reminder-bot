@@ -146,7 +146,8 @@ providers:
     # These URLs may point to a self-hosted Open-Meteo installation instead.
     forecast_url: https://api.open-meteo.com/v1/forecast
     geocoding_url: https://geocoding-api.open-meteo.com/v1/search
-    # Used when the reminder text does not name a city.
+    # Used when the reminder text does not name a city. Hyphenated location
+    # names are retried with spaces if an exact geocoding lookup finds nothing.
     default_location: Moscow
     # Deadline for one geocoding or forecast request.
     timeout: 10s

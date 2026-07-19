@@ -211,16 +211,19 @@ func (p *Provider) resolveLocation(ctx context.Context, params map[string]string
 		return loc, nil
 	}
 
-	u, _ := url.Parse(p.config.GeocodingURL)
-	values := u.Query()
-	values.Set("name", name)
-	values.Set("count", "1")
-	values.Set("language", "ru")
-	values.Set("format", "json")
-	u.RawQuery = values.Encode()
 	var response geocodingResponse
-	if err := p.getJSON(ctx, u.String(), &response); err != nil {
-		return location{}, fmt.Errorf("weather geocoding %q: %w", name, err)
+	queries := []string{name}
+	if fallback := locationNameWithoutHyphens(name); fallback != "" {
+		queries = append(queries, fallback)
+	}
+	for _, query := range queries {
+		response = geocodingResponse{}
+		if err := p.geocode(ctx, query, &response); err != nil {
+			return location{}, fmt.Errorf("weather geocoding %q: %w", name, err)
+		}
+		if len(response.Results) > 0 {
+			break
+		}
 	}
 	if len(response.Results) == 0 {
 		return location{}, fmt.Errorf("weather location %q was not found", name)
@@ -237,6 +240,37 @@ func (p *Provider) resolveLocation(ctx context.Context, params map[string]string
 	p.locations[cacheKey] = loc
 	p.mu.Unlock()
 	return loc, nil
+}
+
+func (p *Provider) geocode(ctx context.Context, name string, response *geocodingResponse) error {
+	u, _ := url.Parse(p.config.GeocodingURL)
+	values := u.Query()
+	values.Set("name", name)
+	values.Set("count", "1")
+	values.Set("language", "ru")
+	values.Set("format", "json")
+	u.RawQuery = values.Encode()
+	return p.getJSON(ctx, u.String(), response)
+}
+
+// locationNameWithoutHyphens provides a conservative fallback for geocoders
+// that index a multi-word place name with spaces but not hyphens.
+func locationNameWithoutHyphens(name string) string {
+	replaced := false
+	normalized := strings.Map(func(r rune) rune {
+		switch r {
+		case '-', '\u2010', '\u2011', '\u2012', '\u2013', '\u2014', '\u2212':
+			replaced = true
+			return ' '
+		default:
+			return r
+		}
+	}, name)
+	if !replaced {
+		return ""
+	}
+	normalized = strings.Join(strings.Fields(normalized), " ")
+	return normalized
 }
 
 func (p *Provider) fetchForecast(ctx context.Context, loc location, params map[string]string) (forecastResponse, error) {

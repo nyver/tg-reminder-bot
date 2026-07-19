@@ -86,6 +86,52 @@ func TestProviderReportsUpstreamAndValidationErrors(t *testing.T) {
 	}
 }
 
+func TestResolveLocationRetriesHyphenatedNameWithSpaces(t *testing.T) {
+	var queries []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/geocode" {
+			http.NotFound(w, r)
+			return
+		}
+		queries = append(queries, r.URL.Query().Get("name"))
+		w.Header().Set("Content-Type", "application/json")
+		if len(queries) == 1 {
+			fmt.Fprint(w, `{"generationtime_ms":0.1}`)
+			return
+		}
+		fmt.Fprint(w, `{"results":[{"name":"Saint Petersburg","country":"Russia","latitude":59.93863,"longitude":30.31413,"timezone":"Europe/Moscow"}]}`)
+	}))
+	t.Cleanup(server.Close)
+
+	p := newTestProvider(t, server.URL, time.Now())
+	params := map[string]string{"location": "Saint-Petersburg"}
+	for range 2 {
+		loc, err := p.resolveLocation(context.Background(), params)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if loc.Name != "Saint Petersburg" || loc.Timezone != "Europe/Moscow" {
+			t.Fatalf("location = %+v", loc)
+		}
+	}
+	if got, want := strings.Join(queries, "|"), "Saint-Petersburg|Saint Petersburg"; got != want {
+		t.Fatalf("geocoding queries = %q, want %q", got, want)
+	}
+}
+
+func TestLocationNameWithoutHyphens(t *testing.T) {
+	tests := map[string]string{
+		"Saint-Petersburg":        "Saint Petersburg",
+		"Rostov\u2011on\u2011Don": "Rostov on Don",
+		"New  York":               "",
+	}
+	for input, want := range tests {
+		if got := locationNameWithoutHyphens(input); got != want {
+			t.Errorf("locationNameWithoutHyphens(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
 func newTestProvider(t *testing.T, baseURL string, now time.Time) *Provider {
 	t.Helper()
 	p, err := New(Config{

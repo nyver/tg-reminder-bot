@@ -415,7 +415,9 @@ The weather provider uses [Open-Meteo's forecast API](https://open-meteo.com/en/
 and [geocoding API](https://open-meteo.com/en/docs/geocoding-api). The public
 non-commercial endpoints do not require an API key. A location named in a
 reminder is geocoded and cached; when no city is present, the provider uses
-`providers.weather.default_location`.
+`providers.weather.default_location`. If an exact lookup of a hyphenated place
+name returns no results, the provider retries once with spaces in place of the
+hyphens (for example, `Saint-Petersburg` becomes `Saint Petersburg`).
 
 Supported free-text scenarios include:
 
