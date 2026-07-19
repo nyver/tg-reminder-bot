@@ -260,6 +260,69 @@ instead of searching by name. `params.channel` is used to look up the
 channel by name. A TV reminder needs at least one of these fields; the `/tv`
 command can also search a program across all channels at once.
 
+## Generic metric conditions
+
+Conditional metric reminders use a provider-independent condition model. The
+reminder spec stores it next to `trigger: threshold`:
+
+```json
+{
+  "trigger": "threshold",
+  "condition": {
+    "operator": "lt",
+    "target": 5000000,
+    "edge_triggered": true
+  },
+  "currency": "RUB",
+  "event": {
+    "type": "price",
+    "title": "Example product",
+    "params": {"url": "https://example.com/product"}
+  },
+  "message": "The price is below 50,000 RUB"
+}
+```
+
+`target` uses the metric provider's integer unit. The built-in price provider
+uses minor currency units, so 50,000 RUB is `5000000` kopecks. Providers for
+temperatures, exchange rates, availability, or content hashes can use their
+own documented integer representation.
+
+| Operator | Matches when |
+| --- | --- |
+| `lt` | value is lower than the target |
+| `lte` | value is lower than or equal to the target |
+| `gt` | value is greater than the target |
+| `gte` | value is greater than or equal to the target |
+| `changed` | value differs from the previous sample |
+| `changed_pct` | absolute change from the previous sample is at least `change_percent` |
+
+For `lt`, `lte`, `gt`, and `gte`, omitting `target` compares the current value
+with the previous sample. This is how "notify on a price decrease" is
+represented. `changed` and `changed_pct` also require a previous sample; the
+first poll only establishes their baseline.
+
+Two delivery modes are supported:
+
+- `edge_triggered: true` sends only when a target comparison changes from
+  false to true. The first sample establishes the baseline. Change operators
+  and targetless previous-sample comparisons emit one event for every matching
+  change. An optional cooldown can throttle rapid edge events.
+- `edge_triggered: false` sends immediately while the condition is true and
+  repeats while it remains true after `cooldown`. A positive cooldown is
+  required for this mode to prevent an alert on every poll.
+
+Every successful sample stores the condition state and last trigger time in
+the existing observation history, so restarts preserve edge and cooldown
+behavior. Legacy specs with top-level `target` and `direction` remain readable;
+`below` maps to `lt`, `above` maps to `gt`, and an omitted direction retains
+the historical lower-than-previous behavior.
+
+The repository currently includes a price metric provider. Other examples
+such as temperature, exchange rates, stock availability, and page hashes need
+a corresponding `MetricProvider`, but use the same evaluator without further
+scheduler changes.
+
 ## Price monitoring
 
 The bot tracks a price drop for a product on an online store's page. To
@@ -272,9 +335,10 @@ create a reminder, just send a link and a keyword:
 уведоми при снижении цены https://example.com/product каждые 30 минут
 ```
 
-The NLU automatically extracts the URL and builds a conditional reminder.
-The worker periodically checks the page and sends a notification when the
-price drops.
+The NLU automatically extracts the URL and builds an edge-triggered `lt`
+condition without a target. The worker periodically checks the page and sends
+a notification for each observed price decrease. Requests with an explicit
+price target or percentage change are mapped to `lt` or `changed_pct`.
 
 ### Poll interval
 

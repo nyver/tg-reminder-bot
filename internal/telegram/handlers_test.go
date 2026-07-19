@@ -421,6 +421,42 @@ func TestValidateParseResultRejectsEmptySpec(t *testing.T) {
 	}
 }
 
+func TestValidateParseResultRejectsLevelConditionWithoutCooldown(t *testing.T) {
+	result := &nlu.ParseResult{
+		Kind: domain.KindConditional, Confidence: 0.9,
+		Spec: &domain.Spec{
+			Trigger: domain.TriggerThreshold,
+			Condition: &domain.Condition{
+				Operator: domain.ConditionOperatorLT,
+			},
+			Event: domain.EventSpec{
+				Type: "price", Params: map[string]string{"url": "https://example.com/product"},
+			},
+		},
+	}
+	if err := validateParseResult(result); err == nil || !strings.Contains(err.Error(), "cooldown") {
+		t.Fatalf("validateParseResult() error = %v", err)
+	}
+}
+
+func TestFormatSpecShowsLevelConditionAndCooldown(t *testing.T) {
+	target := int64(5_000_000)
+	spec := &domain.Spec{
+		Trigger: domain.TriggerThreshold,
+		Condition: &domain.Condition{
+			Operator: domain.ConditionOperatorLT, Target: &target,
+			Cooldown: domain.Duration{Duration: 24 * time.Hour},
+		},
+		Event: domain.EventSpec{Type: "price"},
+	}
+	got := formatSpec(spec)
+	for _, want := range []string{"50 000", "Повторять", "1 день"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("formatSpec() = %q, want substring %q", got, want)
+		}
+	}
+}
+
 func TestValidateParseResultRejectsRSSWithoutURL(t *testing.T) {
 	result := &nlu.ParseResult{
 		Confidence: 0.97,

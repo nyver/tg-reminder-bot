@@ -162,6 +162,10 @@ func parsePriceDrop(text string) *ParseResult {
 		Spec: &domain.Spec{
 			Trigger: domain.TriggerThreshold,
 			Message: "Уведомить при снижении цены",
+			Condition: &domain.Condition{
+				Operator:      domain.ConditionOperatorLT,
+				EdgeTriggered: true,
+			},
 			Event: domain.EventSpec{
 				Type:   "price",
 				Params: map[string]string{"url": u},

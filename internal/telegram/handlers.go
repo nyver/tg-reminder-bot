@@ -1147,7 +1147,12 @@ func (h *Handler) formatConfirmSpec(ctx context.Context, result *nlu.ParseResult
 		sb.WriteString("📌 *" + escapeMarkdown(title) + "*\n")
 	}
 	sb.WriteString(fmt.Sprintf("💰 Текущая цена: *%s*\n", formatPriceRub(m.Value, m.Currency)))
-	sb.WriteString("📉 Уведомить при снижении цены\n")
+	displaySpec := *spec
+	if displaySpec.Currency == "" {
+		displaySpec.Currency = m.Currency
+	}
+	sb.WriteString("🔔 " + escapeMarkdown(metricConditionDescription(&displaySpec)) + "\n")
+	appendConditionMode(&sb, spec)
 	if u := spec.Event.Params["url"]; u != "" {
 		sb.WriteString("🔗 " + escapeMarkdown(u) + "\n")
 	}
@@ -1533,6 +1538,14 @@ func validateParseResult(result *nlu.ParseResult) error {
 		if result.Spec.Trigger == "" || result.Spec.Event.Type == "" {
 			return fmt.Errorf("conditional reminder is incomplete")
 		}
+		if result.Spec.Condition != nil {
+			if result.Spec.Trigger != domain.TriggerThreshold {
+				return fmt.Errorf("condition is only valid for threshold reminders")
+			}
+			if err := result.Spec.Condition.Validate(); err != nil {
+				return err
+			}
+		}
 		switch result.Spec.Event.Type {
 		case "price":
 			if result.Spec.Event.Params["url"] == "" {
@@ -1644,7 +1657,8 @@ func formatSpec(spec *domain.Spec) string {
 		if u := spec.Event.Params["url"]; u != "" {
 			sb.WriteString("🔗 " + escapeMarkdown(u) + "\n")
 		}
-		sb.WriteString("📉 Уведомить при снижении цены\n")
+		sb.WriteString("🔔 " + escapeMarkdown(metricConditionDescription(spec)) + "\n")
+		appendConditionMode(&sb, spec)
 	case domain.TriggerDigest:
 		if spec.Event.Type == "rss" {
 			for _, u := range strings.Split(spec.Event.Params["url"], ",") {
@@ -1668,6 +1682,53 @@ func formatSpec(spec *domain.Spec) string {
 		}
 	}
 	return sb.String()
+}
+
+func metricConditionDescription(spec *domain.Spec) string {
+	if spec == nil || spec.Condition == nil {
+		return "Уведомить при снижении цены"
+	}
+	condition := spec.Condition
+	var reference string
+	if condition.Target != nil {
+		if spec.Event.Type == "price" {
+			reference = formatPriceRub(*condition.Target, spec.Currency)
+		} else {
+			reference = strconv.FormatInt(*condition.Target, 10)
+		}
+	} else {
+		reference = "предыдущего значения"
+	}
+	switch condition.Operator {
+	case domain.ConditionOperatorLT:
+		return "Значение ниже " + reference
+	case domain.ConditionOperatorLTE:
+		return "Значение не выше " + reference
+	case domain.ConditionOperatorGT:
+		return "Значение выше " + reference
+	case domain.ConditionOperatorGTE:
+		return "Значение не ниже " + reference
+	case domain.ConditionOperatorChanged:
+		return "Значение изменилось"
+	case domain.ConditionOperatorChangedPct:
+		if condition.ChangePercent != nil {
+			return "Значение изменилось минимум на " + strconv.FormatFloat(*condition.ChangePercent, 'f', -1, 64) + "%"
+		}
+		return "Значение изменилось"
+	default:
+		return "Условие метрики выполнено"
+	}
+}
+
+func appendConditionMode(sb *strings.Builder, spec *domain.Spec) {
+	if spec == nil || spec.Condition == nil {
+		return
+	}
+	if spec.Condition.EdgeTriggered {
+		sb.WriteString("⚡ Только при переходе условия в выполненное\n")
+		return
+	}
+	sb.WriteString("🔁 Повторять не чаще чем раз в " + escapeMarkdown(formatDurationRu(spec.Condition.Cooldown.Duration)) + "\n")
 }
 
 // formatDurationRu converts a duration to a human-readable Russian string.

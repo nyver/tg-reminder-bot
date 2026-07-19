@@ -336,17 +336,27 @@ func waitForRetry(ctx context.Context, delay time.Duration) error {
 
 // llmResponse is the JSON schema we ask the LLM to produce.
 type llmResponse struct {
-	Kind        string   `json:"kind"`
-	Trigger     string   `json:"trigger,omitempty"`
-	Message     string   `json:"message,omitempty"`
-	FireAt      string   `json:"fire_at,omitempty"`
-	EvalCron    string   `json:"eval_cron,omitempty"`
-	LeadTime    string   `json:"lead_time,omitempty"`
-	TopN        int      `json:"top_n,omitempty"`
-	HorizonDays int      `json:"horizon_days,omitempty"`
-	Event       llmEvent `json:"event,omitempty"`
-	Confidence  float64  `json:"confidence"`
-	Missing     []string `json:"missing,omitempty"`
+	Kind        string        `json:"kind"`
+	Trigger     string        `json:"trigger,omitempty"`
+	Message     string        `json:"message,omitempty"`
+	FireAt      string        `json:"fire_at,omitempty"`
+	EvalCron    string        `json:"eval_cron,omitempty"`
+	LeadTime    string        `json:"lead_time,omitempty"`
+	Currency    string        `json:"currency,omitempty"`
+	TopN        int           `json:"top_n,omitempty"`
+	HorizonDays int           `json:"horizon_days,omitempty"`
+	Condition   *llmCondition `json:"condition,omitempty"`
+	Event       llmEvent      `json:"event,omitempty"`
+	Confidence  float64       `json:"confidence"`
+	Missing     []string      `json:"missing,omitempty"`
+}
+
+type llmCondition struct {
+	Operator      string   `json:"operator,omitempty"`
+	Target        *int64   `json:"target,omitempty"`
+	ChangePercent *float64 `json:"change_percent,omitempty"`
+	EdgeTriggered *bool    `json:"edge_triggered,omitempty"`
+	Cooldown      string   `json:"cooldown,omitempty"`
 }
 
 type llmEvent struct {
@@ -420,6 +430,12 @@ func buildPrompt(text string, now time.Time) string {
   lead_time   "3h"  "24h" "168h"              (для anchor: часы; день=24h, неделя=168h)
   top_n       5                               (для digest)
   horizon_days 30                             (для digest/anchor)
+  condition.operator lt|lte|gt|gte|changed|changed_pct (для threshold)
+  condition.target 5000000                    (для сравнений; цена в копейках)
+  condition.change_percent 10                 (для changed_pct, проценты)
+  condition.edge_triggered true|false          (по умолчанию true)
+  condition.cooldown "6h"                     (обязательно для edge_triggered=false)
+  currency    RUB|USD|EUR                       (если метрика является ценой или курсом)
   event.type  tv_program|price|rss            (для conditional)
   event.title название                        (для tv_program/price)
   event.params {"url":"..."} и т.д. (для rss с несколькими лентами — через запятую: "url1,url2")
@@ -432,7 +448,10 @@ func buildPrompt(text string, now time.Time) string {
 - «за 3 часа до КВН на Первом» → kind=conditional, trigger=anchor, lead_time="3h", event.type=tv_program, event.title="КВН", event.params.channel="Первый канал"
 - «за 1 день до КВН на Первом» → kind=conditional, trigger=anchor, lead_time="24h", event.type=tv_program, event.title="КВН", event.params.channel="Первый канал"
 - «за 1 неделю до КВН на Первом» → kind=conditional, trigger=anchor, lead_time="168h", event.type=tv_program, event.title="КВН", event.params.channel="Первый канал"
-- «уведоми при снижении цены» + URL → kind=conditional, trigger=threshold, event.type=price, event.params.url=<URL>, event.title=название из текста или URL-slug (опусти если неясно)
+- «уведоми при снижении цены» + URL → kind=conditional, trigger=threshold, condition.operator=lt без target, condition.edge_triggered=true, event.type=price, event.params.url=<URL>, event.title=название из текста или URL-slug (опусти если неясно)
+- «уведоми, когда цена станет ниже 50 000 ₽» + URL → condition.operator=lt, condition.target=5000000, condition.edge_triggered=true
+- «повторяй, пока цена ниже 50 000 ₽, но не чаще раза в день» + URL → condition.operator=lt, condition.target=5000000, condition.edge_triggered=false, condition.cooldown="24h"
+- «сообщи, если цена изменится больше чем на 10%%» + URL → condition.operator=changed_pct, condition.change_percent=10, condition.edge_triggered=true
 - «каждые 2 часа» при снижении цены → eval_cron="0 */2 * * *"
 - «каждые 30 минут» при снижении цены → eval_cron="*/30 * * * *"
 - «каждый час» / «раз в час» при снижении цены → eval_cron="0 * * * *"
@@ -494,6 +513,7 @@ func clampTopN(n int) int {
 func mapToResult(resp *llmResponse) (*ParseResult, error) {
 	spec := &domain.Spec{
 		Message:     resp.Message,
+		Currency:    strings.ToUpper(resp.Currency),
 		TopN:        clampTopN(resp.TopN),
 		HorizonDays: resp.HorizonDays,
 		Event: domain.EventSpec{
@@ -501,6 +521,29 @@ func mapToResult(resp *llmResponse) (*ParseResult, error) {
 			Title:  resp.Event.Title,
 			Params: resp.Event.Params,
 		},
+	}
+	if resp.Condition != nil {
+		edgeTriggered := true
+		if resp.Condition.EdgeTriggered != nil {
+			edgeTriggered = *resp.Condition.EdgeTriggered
+		}
+		condition := &domain.Condition{
+			Operator:      resp.Condition.Operator,
+			Target:        resp.Condition.Target,
+			ChangePercent: resp.Condition.ChangePercent,
+			EdgeTriggered: edgeTriggered,
+		}
+		if resp.Condition.Cooldown != "" {
+			cooldown, err := time.ParseDuration(resp.Condition.Cooldown)
+			if err != nil {
+				return nil, fmt.Errorf("invalid condition cooldown: %w", err)
+			}
+			condition.Cooldown = domain.Duration{Duration: cooldown}
+		}
+		if err := condition.Validate(); err != nil {
+			return nil, err
+		}
+		spec.Condition = condition
 	}
 
 	if resp.Trigger != "" {

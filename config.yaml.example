@@ -67,6 +67,10 @@ providers:
     timeout: 120s
 
   price:
+    # Price reminders use the generic condition model stored in each reminder:
+    # lt/lte/gt/gte, changed, or changed_pct. Edge-triggered conditions are the
+    # safe default; level-triggered conditions must specify a positive cooldown.
+    # Targets are stored in minor currency units (for example, 5000000 = RUB 50000).
     # User-Agent for requests to store pages.
     user_agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36
     # Timeout for fetching the product page (HTTP mode) or loading it in the browser (headless).

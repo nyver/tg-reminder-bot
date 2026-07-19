@@ -18,6 +18,8 @@ type eventProviderFunc func(context.Context, provider.Query, time.Time, time.Tim
 
 type metricProviderFunc func(context.Context, provider.Query) (provider.Measurement, error)
 
+type temperatureMetricProviderFunc func(context.Context, provider.Query) (provider.Measurement, error)
+
 func (eventProviderFunc) Type() string { return "tv_program" }
 
 func (f eventProviderFunc) Lookup(ctx context.Context, q provider.Query, from, to time.Time) ([]provider.Event, error) {
@@ -27,6 +29,12 @@ func (f eventProviderFunc) Lookup(ctx context.Context, q provider.Query, from, t
 func (metricProviderFunc) Type() string { return "price" }
 
 func (f metricProviderFunc) Sample(ctx context.Context, q provider.Query) (provider.Measurement, error) {
+	return f(ctx, q)
+}
+
+func (temperatureMetricProviderFunc) Type() string { return "temperature" }
+
+func (f temperatureMetricProviderFunc) Sample(ctx context.Context, q provider.Query) (provider.Measurement, error) {
 	return f(ctx, q)
 }
 
@@ -186,6 +194,34 @@ func TestThresholdProviderErrorNotifiesUser(t *testing.T) {
 	}
 	if !strings.Contains(planned[0].Text, "429") {
 		t.Fatalf("notification text should contain HTTP status 429, got: %s", planned[0].Text)
+	}
+}
+
+func TestMetricConditionAcceptsNegativeValuesOutsidePriceProvider(t *testing.T) {
+	now := time.Date(2026, 7, 19, 8, 0, 0, 0, time.UTC)
+	registry := provider.NewRegistry()
+	registry.RegisterMetric(temperatureMetricProviderFunc(func(context.Context, provider.Query) (provider.Measurement, error) {
+		return provider.Measurement{Available: true, Value: -1, Title: "Outside"}, nil
+	}))
+	target := int64(0)
+	evaluator := NewEvaluator(registry, &fixedHistory{last: &domain.Observation{Value: 2}}, clock.NewFake(now), 180, nil)
+	rem := domain.Reminder{
+		ID: uuid.New(), UserID: 42, Kind: domain.KindConditional,
+		Spec: domain.Spec{
+			Trigger: domain.TriggerThreshold,
+			Condition: &domain.Condition{
+				Operator: domain.ConditionOperatorLT, Target: &target, EdgeTriggered: true,
+			},
+			Event: domain.EventSpec{Type: "temperature", Title: "Outside"},
+		},
+	}
+
+	planned, err := evaluator.Evaluate(context.Background(), rem)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(planned) != 1 || !strings.Contains(planned[0].Text, "-1") {
+		t.Fatalf("planned = %+v", planned)
 	}
 }
 

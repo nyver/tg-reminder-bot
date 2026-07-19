@@ -352,6 +352,48 @@ func TestMapToResultRescuesURLFromMessage(t *testing.T) {
 	}
 }
 
+func TestMapToResultMapsGenericCondition(t *testing.T) {
+	target := int64(5_000_000)
+	edge := false
+	resp := &llmResponse{
+		Kind: "conditional", Trigger: "threshold", Confidence: 0.95, Currency: "rub",
+		Condition: &llmCondition{
+			Operator: domain.ConditionOperatorLTE, Target: &target,
+			EdgeTriggered: &edge, Cooldown: "24h",
+		},
+		Event: llmEvent{Type: "price", Params: map[string]string{"url": "https://example.com/product"}},
+	}
+	result, err := mapToResult(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	condition := result.Spec.Condition
+	if condition == nil || condition.Operator != domain.ConditionOperatorLTE || condition.Target == nil || *condition.Target != target {
+		t.Fatalf("condition = %+v", condition)
+	}
+	if condition.EdgeTriggered || condition.Cooldown.Duration != 24*time.Hour {
+		t.Fatalf("condition mode = %+v", condition)
+	}
+	if result.Spec.Currency != "RUB" {
+		t.Fatalf("currency = %q, want RUB", result.Spec.Currency)
+	}
+}
+
+func TestMapToResultDefaultsConditionToEdgeTriggered(t *testing.T) {
+	resp := &llmResponse{
+		Kind: "conditional", Trigger: "threshold", Confidence: 0.95,
+		Condition: &llmCondition{Operator: domain.ConditionOperatorChanged},
+		Event:     llmEvent{Type: "price", Params: map[string]string{"url": "https://example.com/product"}},
+	}
+	result, err := mapToResult(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Spec.Condition == nil || !result.Spec.Condition.EdgeTriggered {
+		t.Fatalf("condition = %+v", result.Spec.Condition)
+	}
+}
+
 func TestParseLeadTime(t *testing.T) {
 	cases := []struct {
 		input string

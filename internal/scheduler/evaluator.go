@@ -207,6 +207,10 @@ func (e *Evaluator) evaluateThreshold(ctx context.Context, r domain.Reminder) ([
 	if !ok {
 		return nil, fmt.Errorf("no metric provider for %q", r.Spec.Event.Type)
 	}
+	condition, err := reminderCondition(r.Spec)
+	if err != nil {
+		return nil, fmt.Errorf("invalid metric condition: %w", err)
+	}
 	now := e.clock.Now()
 
 	m, err := mp.Sample(ctx, provider.Query{
@@ -219,13 +223,16 @@ func (e *Evaluator) evaluateThreshold(ctx context.Context, r domain.Reminder) ([
 			"provider", r.Spec.Event.Type,
 			"err", err,
 		)
-		return priceUnavailableNotification(r, now, m.HTTPStatus), nil
+		return metricUnavailableNotification(r, now, m.HTTPStatus), nil
 	}
 
-	// Value == 0 means the page loaded but price extraction failed (e.g. WAF block).
-	// Treat it the same as unavailable to avoid a false "price dropped to 0" alert.
-	if !m.Available || m.Value <= 0 {
-		return priceUnavailableNotification(r, now, m.HTTPStatus), nil
+	// A non-positive price means extraction failed (for example due to a WAF).
+	// Other metric types may legitimately report zero or negative values.
+	if !m.Available || (r.Spec.Event.Type == "price" && m.Value <= 0) {
+		return metricUnavailableNotification(r, now, m.HTTPStatus), nil
+	}
+	if e.history == nil {
+		return nil, fmt.Errorf("metric condition evaluation requires history storage")
 	}
 
 	// Read previous observation BEFORE saving so prev is truly the last point,
@@ -236,35 +243,28 @@ func (e *Evaluator) evaluateThreshold(ctx context.Context, r domain.Reminder) ([
 		return nil, fmt.Errorf("history last: %w", err)
 	}
 
+	decision := evaluateMetricCondition(condition, m.Value, prev, now)
 	obs := &domain.Observation{
 		ReminderID: r.ID,
 		Value:      m.Value,
 		Currency:   m.Currency,
 		Available:  m.Available,
 		Title:      m.Title,
+		Raw:        encodeConditionState(decision.State),
 		ObservedAt: now,
 	}
 	if err := e.history.Save(ctx, obs); err != nil {
-		e.log.Warn("save observation failed", "reminder_id", r.ID, "err", err)
+		return nil, fmt.Errorf("save metric observation: %w", err)
 	}
 
-	if prev == nil {
-		// First observation — establish baseline, no notification yet.
-		return nil, nil
-	}
-	if m.Value >= prev.Value {
-		return nil, nil // price didn't drop
-	}
-
-	// Check target threshold.
-	if r.Spec.Target != nil && m.Value > *r.Spec.Target {
+	if !decision.Notify {
 		return nil, nil
 	}
 
-	key := userIdemKey(r.UserID, "threshold:"+r.ID.String()+":"+now.In(userTZ(r)).Format("2006-01-02"))
+	key := userIdemKey(r.UserID, "condition:"+r.ID.String()+":"+now.UTC().Format(time.RFC3339Nano))
 	return []PlannedNotification{{
 		FireAt:         now,
-		Text:           renderThresholdText(r.Spec, m, prev),
+		Text:           renderConditionText(r.Spec, condition, m, prev),
 		IdempotencyKey: key,
 	}}, nil
 }
@@ -462,11 +462,11 @@ func orDefault(v, def int) int {
 	return v
 }
 
-func priceUnavailableNotification(r domain.Reminder, now time.Time, httpStatus int) []PlannedNotification {
-	key := userIdemKey(r.UserID, "price_unavailable:"+r.ID.String()+":"+now.In(userTZ(r)).Format("2006-01-02"))
+func metricUnavailableNotification(r domain.Reminder, now time.Time, httpStatus int) []PlannedNotification {
+	key := userIdemKey(r.UserID, "metric_unavailable:"+r.ID.String()+":"+now.In(userTZ(r)).Format("2006-01-02"))
 	return []PlannedNotification{{
 		FireAt:         now,
-		Text:           renderPriceUnavailableText(r.Spec, httpStatus),
+		Text:           renderMetricUnavailableText(r.Spec, httpStatus),
 		IdempotencyKey: key,
 	}}
 }
@@ -511,9 +511,13 @@ func renderTVProgramText(ev provider.Event, loc *time.Location) string {
 	return text
 }
 
-func renderPriceUnavailableText(spec domain.Spec, httpStatus int) string {
+func renderMetricUnavailableText(spec domain.Spec, httpStatus int) string {
 	var sb strings.Builder
-	sb.WriteString("⚠️ Не удалось получить текущую цену\n")
+	if spec.Event.Type == "price" {
+		sb.WriteString("⚠️ Не удалось получить текущую цену\n")
+	} else {
+		sb.WriteString("⚠️ Не удалось получить текущее значение\n")
+	}
 	if spec.Event.Title != "" {
 		sb.WriteString("*" + spec.Event.Title + "*\n")
 	}
@@ -523,19 +527,51 @@ func renderPriceUnavailableText(spec domain.Spec, httpStatus int) string {
 	if httpStatus > 0 {
 		sb.WriteString(fmt.Sprintf("\nHTTP статус: *%d*\n", httpStatus))
 	}
-	sb.WriteString("\nБот продолжит проверять и уведомит при снижении цены.")
+	if spec.Event.Type == "price" {
+		sb.WriteString("\nБот продолжит проверять цену.")
+	} else {
+		sb.WriteString("\nБот продолжит проверять условие.")
+	}
 	return sb.String()
 }
 
-func renderThresholdText(spec domain.Spec, m provider.Measurement, prev *domain.Observation) string {
-	price := formatPrice(m.Value, m.Currency)
-	delta := ""
-	if prev != nil && prev.Value > 0 {
-		diff := prev.Value - m.Value
-		delta = fmt.Sprintf(" (−%s к предыдущей)", formatPrice(diff, m.Currency))
+func renderConditionText(spec domain.Spec, condition domain.Condition, m provider.Measurement, prev *domain.Observation) string {
+	title := m.Title
+	if title == "" {
+		title = spec.Event.Title
 	}
-	return fmt.Sprintf("📉 Цена снизилась!\n%s\nЦена: *%s*%s\n%s",
-		spec.Event.Title, price, delta, spec.Message)
+	if spec.Event.Type == "price" && condition.Operator == domain.ConditionOperatorLT && condition.Target == nil {
+		price := formatPrice(m.Value, m.Currency)
+		delta := ""
+		if prev != nil && prev.Value > 0 {
+			diff := prev.Value - m.Value
+			delta = fmt.Sprintf(" (−%s к предыдущей)", formatPrice(diff, m.Currency))
+		}
+		return fmt.Sprintf("📉 Цена снизилась!\n%s\nЦена: *%s*%s\n%s",
+			title, price, delta, spec.Message)
+	}
+
+	value := formatMetricValue(m.Value, m.Currency)
+	var sb strings.Builder
+	sb.WriteString("🔔 Условие выполнено!\n")
+	if title != "" {
+		sb.WriteString(title + "\n")
+	}
+	sb.WriteString("Значение: *" + value + "*")
+	if prev != nil {
+		sb.WriteString(" (предыдущее: " + formatMetricValue(prev.Value, m.Currency) + ")")
+	}
+	if spec.Message != "" {
+		sb.WriteString("\n" + spec.Message)
+	}
+	return sb.String()
+}
+
+func formatMetricValue(value int64, currency string) string {
+	if currency != "" {
+		return formatPrice(value, currency)
+	}
+	return strconv.FormatInt(value, 10)
 }
 
 func renderDigest(spec domain.Spec, offers []provider.Offer, prev *domain.Observation, from, to time.Time) string {
