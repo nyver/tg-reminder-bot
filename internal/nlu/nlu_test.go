@@ -3,30 +3,31 @@ package nlu
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/nyver2k/remindertgbot/internal/domain"
 )
 
-type parserFunc func(context.Context, string) (*ParseResult, error)
+type parserFunc func(context.Context, string, *time.Location) (*ParseResult, error)
 
-func (f parserFunc) Parse(ctx context.Context, text string) (*ParseResult, error) {
-	return f(ctx, text)
+func (f parserFunc) Parse(ctx context.Context, text string, loc *time.Location) (*ParseResult, error) {
+	return f(ctx, text, loc)
 }
 
 func TestChainReturnsParserErrorInsteadOfEmptyResult(t *testing.T) {
 	wantErr := errors.New("provider unavailable")
 	chain := NewChain(0.85,
-		parserFunc(func(context.Context, string) (*ParseResult, error) {
+		parserFunc(func(context.Context, string, *time.Location) (*ParseResult, error) {
 			return &ParseResult{Spec: &domain.Spec{}, Confidence: 0}, nil
 		}),
-		parserFunc(func(context.Context, string) (*ParseResult, error) {
+		parserFunc(func(context.Context, string, *time.Location) (*ParseResult, error) {
 			return nil, wantErr
 		}),
 	)
 
-	result, err := chain.Parse(context.Background(), "conditional reminder")
+	result, err := chain.Parse(context.Background(), "conditional reminder", time.UTC)
 	if result != nil || !errors.Is(err, wantErr) {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
@@ -38,19 +39,42 @@ func TestChainReturnsMeaningfulLowConfidenceResult(t *testing.T) {
 		Spec:       &domain.Spec{Trigger: domain.TriggerAnchor, Event: domain.EventSpec{Type: "tv_program"}},
 		Confidence: 0.5,
 	}
-	chain := NewChain(0.85, parserFunc(func(context.Context, string) (*ParseResult, error) {
+	chain := NewChain(0.85, parserFunc(func(context.Context, string, *time.Location) (*ParseResult, error) {
 		return want, nil
 	}))
 
-	got, err := chain.Parse(context.Background(), "conditional reminder")
+	got, err := chain.Parse(context.Background(), "conditional reminder", time.UTC)
 	if err != nil || got != want {
 		t.Fatalf("result=%+v err=%v", got, err)
 	}
 }
 
+func TestChainPassesRequestLocationToParser(t *testing.T) {
+	wantLoc, err := time.LoadLocation("Asia/Yekaterinburg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var gotLoc *time.Location
+	chain := NewChain(0.85, parserFunc(func(_ context.Context, _ string, loc *time.Location) (*ParseResult, error) {
+		gotLoc = loc
+		return &ParseResult{
+			Kind:       domain.KindAbsolute,
+			Spec:       &domain.Spec{Message: "test"},
+			Confidence: 0.95,
+		}, nil
+	}))
+
+	if _, err := chain.Parse(context.Background(), "test", wantLoc); err != nil {
+		t.Fatal(err)
+	}
+	if gotLoc != wantLoc {
+		t.Fatalf("parser location = %v, want %v", gotLoc, wantLoc)
+	}
+}
+
 func TestFastPathParsesTVAnchorReminder(t *testing.T) {
-	parser := NewFastPath(time.UTC)
-	result, err := parser.Parse(context.Background(), `уведоми за 5 часов до программы "Этот день победы" на первом канале`)
+	parser := NewFastPath()
+	result, err := parser.Parse(context.Background(), `уведоми за 5 часов до программы "Этот день победы" на первом канале`, time.UTC)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,8 +89,36 @@ func TestFastPathParsesTVAnchorReminder(t *testing.T) {
 	}
 }
 
+func TestFastPathUsesLocationFromEachRequest(t *testing.T) {
+	parser := NewFastPath()
+	yekaterinburg, err := time.LoadLocation("Asia/Yekaterinburg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	newYork, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const text = "напомни 25.12.2030 в 09:00 позвонить"
+
+	yekaterinburgResult, err := parser.Parse(context.Background(), text, yekaterinburg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newYorkResult, err := parser.Parse(context.Background(), text, newYork)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := *yekaterinburgResult.FireAt; !strings.HasSuffix(got, "+05:00") {
+		t.Fatalf("Yekaterinburg fire_at = %q, want +05:00 offset", got)
+	}
+	if got := *newYorkResult.FireAt; !strings.HasSuffix(got, "-05:00") {
+		t.Fatalf("New York fire_at = %q, want -05:00 offset", got)
+	}
+}
+
 func TestFastPathTVAnchorDaysAndWeeks(t *testing.T) {
-	parser := NewFastPath(time.UTC)
+	parser := NewFastPath()
 	cases := []struct {
 		text     string
 		leadTime time.Duration
@@ -78,7 +130,7 @@ func TestFastPathTVAnchorDaysAndWeeks(t *testing.T) {
 		{"уведоми за 2 недели до КВН на Первом канале", 14 * 24 * time.Hour},
 	}
 	for _, tc := range cases {
-		result, err := parser.Parse(context.Background(), tc.text)
+		result, err := parser.Parse(context.Background(), tc.text, time.UTC)
 		if err != nil {
 			t.Fatalf("%q: %v", tc.text, err)
 		}
@@ -99,7 +151,7 @@ func TestFastPathTVAnchorDaysAndWeeks(t *testing.T) {
 
 func TestFastPathParsesURLPriceDrop(t *testing.T) {
 	t.Parallel()
-	parser := NewFastPath(time.UTC)
+	parser := NewFastPath()
 
 	cases := []string{
 		"https://www.dns-shop.ru/product/abc/ - уведоми при снижении цены",
@@ -107,7 +159,7 @@ func TestFastPathParsesURLPriceDrop(t *testing.T) {
 		"уведоми при снижении цены https://www.dns-shop.ru/product/abc/",
 	}
 	for _, text := range cases {
-		result, err := parser.Parse(context.Background(), text)
+		result, err := parser.Parse(context.Background(), text, time.UTC)
 		if err != nil {
 			t.Fatalf("%q: %v", text, err)
 		}
@@ -125,9 +177,9 @@ func TestFastPathParsesURLPriceDrop(t *testing.T) {
 
 func TestFastPathParsesRSSDigest(t *testing.T) {
 	t.Parallel()
-	parser := NewFastPath(time.UTC)
+	parser := NewFastPath()
 
-	result, err := parser.Parse(context.Background(), "каждый день в 18:00 создай дайджест новостей на основе https://lenta.ru/rss")
+	result, err := parser.Parse(context.Background(), "каждый день в 18:00 создай дайджест новостей на основе https://lenta.ru/rss", time.UTC)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,9 +202,9 @@ func TestFastPathParsesRSSDigest(t *testing.T) {
 // param, for a single shared top-N digest across all of them.
 func TestFastPathParsesRSSDigestMultipleURLs(t *testing.T) {
 	t.Parallel()
-	parser := NewFastPath(time.UTC)
+	parser := NewFastPath()
 
-	result, err := parser.Parse(context.Background(), "дайджест новостей по лентам https://lenta.ru/rss и https://habr.com/rss в 8:00")
+	result, err := parser.Parse(context.Background(), "дайджест новостей по лентам https://lenta.ru/rss и https://habr.com/rss в 8:00", time.UTC)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,9 +222,9 @@ func TestFastPathParsesRSSDigestMultipleURLs(t *testing.T) {
 
 func TestFastPathRSSDigestDefaultsAndTopN(t *testing.T) {
 	t.Parallel()
-	parser := NewFastPath(time.UTC)
+	parser := NewFastPath()
 
-	result, err := parser.Parse(context.Background(), "дайджест новостей по ленте https://lenta.ru/rss")
+	result, err := parser.Parse(context.Background(), "дайджест новостей по ленте https://lenta.ru/rss", time.UTC)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +235,7 @@ func TestFastPathRSSDigestDefaultsAndTopN(t *testing.T) {
 		t.Fatalf("top_n = %d, want 0 (evaluator applies its own default)", result.Spec.TopN)
 	}
 
-	result, err = parser.Parse(context.Background(), "дайджест новостей топ 10 по ленте https://lenta.ru/rss")
+	result, err = parser.Parse(context.Background(), "дайджест новостей топ 10 по ленте https://lenta.ru/rss", time.UTC)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -197,9 +249,9 @@ func TestFastPathRSSDigestDefaultsAndTopN(t *testing.T) {
 // through to the plain recurring-text pattern instead.
 func TestFastPathIgnoresRSSDigestWithoutURL(t *testing.T) {
 	t.Parallel()
-	parser := NewFastPath(time.UTC)
+	parser := NewFastPath()
 
-	result, err := parser.Parse(context.Background(), "каждый день в 18:00 покажи дайджест новостей")
+	result, err := parser.Parse(context.Background(), "каждый день в 18:00 покажи дайджест новостей", time.UTC)
 	if err != nil {
 		t.Fatal(err)
 	}

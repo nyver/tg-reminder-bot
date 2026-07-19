@@ -15,6 +15,76 @@ import (
 	tele "gopkg.in/telebot.v3"
 )
 
+type userServiceStub struct {
+	user *domain.User
+	err  error
+}
+
+func (s userServiceStub) GetOrCreate(context.Context, int64) (*domain.User, error) {
+	return s.user, s.err
+}
+
+func (userServiceStub) SetTZ(context.Context, int64, string) error { return nil }
+
+func TestLoadUserLocation(t *testing.T) {
+	h := &Handler{users: userServiceStub{user: &domain.User{ID: 42, TZ: "Asia/Yekaterinburg"}}}
+
+	loc, tz, err := h.loadUserLocation(context.Background(), 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tz != "Asia/Yekaterinburg" || loc.String() != tz {
+		t.Fatalf("location = %v, timezone = %q", loc, tz)
+	}
+}
+
+func TestLoadUserLocationRejectsInvalidTimezone(t *testing.T) {
+	h := &Handler{users: userServiceStub{user: &domain.User{ID: 42, TZ: "invalid/timezone"}}}
+
+	if _, _, err := h.loadUserLocation(context.Background(), 42); err == nil {
+		t.Fatal("expected invalid user timezone error")
+	}
+}
+
+func TestLoadUserLocationDefaultsToMoscow(t *testing.T) {
+	h := &Handler{users: userServiceStub{user: &domain.User{ID: 42}}}
+
+	loc, tz, err := h.loadUserLocation(context.Background(), 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tz != defaultUserTimezone || loc.String() != defaultUserTimezone {
+		t.Fatalf("location = %v, timezone = %q", loc, tz)
+	}
+}
+
+func TestLoadUserLocationRejectsMissingProfile(t *testing.T) {
+	h := &Handler{users: userServiceStub{}}
+
+	if _, _, err := h.loadUserLocation(context.Background(), 42); err == nil {
+		t.Fatal("expected missing user profile error")
+	}
+}
+
+func TestNextCronAtRespectsExplicitUTC(t *testing.T) {
+	now := time.Date(2026, 7, 19, 17, 30, 0, 0, time.UTC)
+
+	next, err := nextCronAt("0 18 * * *", now, "UTC")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := time.Date(2026, 7, 19, 18, 0, 0, 0, time.UTC)
+	if !next.Equal(want) || next.Location() != time.UTC {
+		t.Fatalf("next cron = %v, want %v in UTC", next, want)
+	}
+}
+
+func TestNextCronAtRejectsInvalidTimezone(t *testing.T) {
+	if _, err := nextCronAt("0 18 * * *", time.Now(), "invalid/timezone"); err == nil {
+		t.Fatal("expected invalid timezone error")
+	}
+}
+
 func TestWriteTVShowsGroupsByChannelAndDay(t *testing.T) {
 	loc := time.FixedZone("MSK", 3*60*60)
 	shows := []provider.TVShowtime{

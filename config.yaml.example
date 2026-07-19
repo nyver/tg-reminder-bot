@@ -17,6 +17,8 @@ telegram:
   # No extra configuration is required; users can still type free-form text.
 
 nlu:
+  # Free-form dates and times are interpreted in the per-user IANA timezone
+  # configured through /tz (Europe/Moscow for newly created users).
   # LLM used for natural-language parsing: openrouter or claude.
   provider: openrouter
   # Shared key for the selected provider. Can also be passed via LLM_API_KEY.

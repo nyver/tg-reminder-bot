@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"github.com/nyver2k/remindertgbot/internal/clock"
 	"github.com/nyver2k/remindertgbot/internal/config"
@@ -50,14 +49,13 @@ func main() {
 	observationRepo := postgres.NewObservationRepo(db)
 	dialogRepo := postgres.NewDialogRepo(db)
 
-	loc, _ := time.LoadLocation("Europe/Moscow")
-	fastPath := nlu.NewFastPath(loc)
+	fastPath := nlu.NewFastPath()
 	model := cfg.NLU.OpenRouter.Model
 	baseURL := cfg.NLU.OpenRouter.BaseURL
 	if cfg.NLU.Provider == "claude" {
 		model = cfg.NLU.Claude.Model
 	}
-	llmParser, err := nlu.NewConfiguredLLMParser(cfg.NLU.Provider, cfg.NLU.APIKey, model, baseURL, cfg.NLU.OpenRouter.FallbackModels, cfg.NLU.OpenRouter.Timeout, cfg.NLU.OpenRouter.MaxTokens, loc, log)
+	llmParser, err := nlu.NewConfiguredLLMParser(cfg.NLU.Provider, cfg.NLU.APIKey, model, baseURL, cfg.NLU.OpenRouter.FallbackModels, cfg.NLU.OpenRouter.Timeout, cfg.NLU.OpenRouter.MaxTokens, log)
 	if err != nil {
 		log.Error("nlu init", "err", err)
 		os.Exit(1)

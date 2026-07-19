@@ -3,6 +3,7 @@ package nlu
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/nyver2k/remindertgbot/internal/domain"
 )
@@ -17,9 +18,10 @@ type ParseResult struct {
 	FireAt     *string  // absolute: RFC3339 string
 }
 
-// Parser converts free-form Russian text into a structured Spec.
+// Parser converts free-form Russian text into a structured Spec. loc is the
+// user's timezone for this request; implementations fall back to UTC if nil.
 type Parser interface {
-	Parse(ctx context.Context, text string) (*ParseResult, error)
+	Parse(ctx context.Context, text string, loc *time.Location) (*ParseResult, error)
 }
 
 // Chain tries parsers in order; returns the first with confidence >= threshold.
@@ -32,11 +34,11 @@ func NewChain(threshold float64, parsers ...Parser) *Chain {
 	return &Chain{parsers: parsers, threshold: threshold}
 }
 
-func (c *Chain) Parse(ctx context.Context, text string) (*ParseResult, error) {
+func (c *Chain) Parse(ctx context.Context, text string, loc *time.Location) (*ParseResult, error) {
 	var best *ParseResult
 	var lastErr error
 	for _, p := range c.parsers {
-		result, err := p.Parse(ctx, text)
+		result, err := p.Parse(ctx, text, loc)
 		if err != nil {
 			lastErr = err
 			continue

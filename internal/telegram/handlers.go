@@ -130,7 +130,7 @@ func (h *Handler) handleList(c tele.Context) error {
 		return c.Send(msgEmptyList, mainMenu(), tele.ModeMarkdown)
 	}
 
-	loc, _ := time.LoadLocation("Europe/Moscow")
+	loc, _ := time.LoadLocation(defaultUserTimezone)
 	if u, err := h.users.GetOrCreate(ctx, c.Sender().ID); err == nil && u.TZ != "" {
 		if l, err := time.LoadLocation(u.TZ); err == nil {
 			loc = l
@@ -554,7 +554,7 @@ func (h *Handler) handleTV(c tele.Context) error {
 	defer cancel()
 	userID := c.Sender().ID
 
-	loc, _ := time.LoadLocation("Europe/Moscow")
+	loc, _ := time.LoadLocation(defaultUserTimezone)
 	if u, err := h.users.GetOrCreate(ctx, userID); err == nil && u.TZ != "" {
 		if l, err := time.LoadLocation(u.TZ); err == nil {
 			loc = l
@@ -993,14 +993,13 @@ func (h *Handler) handleText(c tele.Context) error {
 func (h *Handler) startParsing(ctx context.Context, c tele.Context, userID int64, text string) error {
 	_ = c.Bot().Notify(c.Sender(), tele.Typing)
 
-	userTZ := ""
-	if u, err := h.users.GetOrCreate(ctx, userID); err != nil {
-		h.log.Warn("getorcreate user", "err", err)
-	} else {
-		userTZ = u.TZ
+	loc, userTZ, err := h.loadUserLocation(ctx, userID)
+	if err != nil {
+		h.log.Error("load user timezone", "user_id", userID, "err", err)
+		return c.Send("Не удалось получить часовой пояс. Попробуйте позже.", mainMenu())
 	}
 
-	result, err := h.parser.Parse(ctx, text)
+	result, err := h.parser.Parse(ctx, text, loc)
 	if err != nil {
 		h.log.Error("parse failed", "err", err)
 		return c.Send(msgParseFailed, mainMenu())
@@ -1010,6 +1009,25 @@ func (h *Handler) startParsing(ctx context.Context, c tele.Context, userID int64
 	}
 
 	return h.continueParsing(ctx, c, userID, text, result, userTZ)
+}
+
+func (h *Handler) loadUserLocation(ctx context.Context, userID int64) (*time.Location, string, error) {
+	u, err := h.users.GetOrCreate(ctx, userID)
+	if err != nil {
+		return nil, "", fmt.Errorf("get user: %w", err)
+	}
+	if u == nil {
+		return nil, "", fmt.Errorf("get user: empty profile")
+	}
+	tz := strings.TrimSpace(u.TZ)
+	if tz == "" {
+		tz = defaultUserTimezone
+	}
+	loc, err := time.LoadLocation(tz)
+	if err != nil {
+		return nil, "", fmt.Errorf("load user timezone %q: %w", tz, err)
+	}
+	return loc, tz, nil
 }
 
 // continueParsing asks for any still-missing fields, otherwise validates and
@@ -1359,16 +1377,22 @@ func (h *Handler) handleFieldInput(ctx context.Context, c tele.Context, dialog *
 
 	// Merge field answer into existing parsed spec via re-parse with context.
 	combined := dc.RawText + " " + text
-	result, err := h.parser.Parse(ctx, combined)
+	loc, userTZ, err := h.loadUserLocation(ctx, c.Sender().ID)
+	if err != nil {
+		h.log.Error("load user timezone", "user_id", c.Sender().ID, "err", err)
+		return c.Send("Не удалось получить часовой пояс. Попробуйте позже.")
+	}
+	result, err := h.parser.Parse(ctx, combined, loc)
 	if err != nil {
 		// Don't leave user stuck — reset dialog so next message starts fresh.
 		_ = h.dialogs.Reset(ctx, c.Sender().ID)
 		return c.Send("Не удалось распознать. Попробуйте описать напоминание заново.")
 	}
-	return h.continueParsing(ctx, c, c.Sender().ID, combined, result, dc.UserTZ)
+	return h.continueParsing(ctx, c, c.Sender().ID, combined, result, userTZ)
 }
 
 const (
+	defaultUserTimezone    = "Europe/Moscow"
 	defaultConditionalCron = "*/5 * * * *"
 	// handlerTimeout caps the total wall time of a single Telegram handler.
 	// Prevents goroutine leaks when DB or external calls hang indefinitely.
@@ -1581,18 +1605,13 @@ func nextCronAt(expr string, now time.Time, userTZ string) (time.Time, error) {
 	if err != nil {
 		return time.Time{}, err
 	}
-	loc := time.UTC
-	if userTZ != "" {
-		if l, err := time.LoadLocation(userTZ); err == nil {
-			loc = l
-		}
+	tz := strings.TrimSpace(userTZ)
+	if tz == "" {
+		tz = defaultUserTimezone
 	}
-	if loc == time.UTC {
-		// Fall back to Moscow when user has not configured a timezone,
-		// preserving historical behaviour for Russian-speaking users.
-		if msk, err := time.LoadLocation("Europe/Moscow"); err == nil {
-			loc = msk
-		}
+	loc, err := time.LoadLocation(tz)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("load timezone %q: %w", tz, err)
 	}
 	return schedule.Next(now.In(loc)), nil
 }

@@ -13,6 +13,30 @@ import (
 	"time"
 )
 
+func TestLLMParserUsesRequestLocationInPrompt(t *testing.T) {
+	loc, err := time.LoadLocation("Asia/Yekaterinburg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var prompt string
+	parser := &LLMParser{complete: func(_ context.Context, got string) (string, error) {
+		prompt = got
+		return `{"kind":"absolute","message":"test","confidence":0.95}`, nil
+	}}
+
+	if _, err := parser.Parse(context.Background(), "напомни завтра в 9:00", loc); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"Asia/Yekaterinburg", "+05:00"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt missing %q:\n%s", want, prompt)
+		}
+	}
+	if strings.Contains(prompt, "(MSK)") {
+		t.Fatalf("prompt still contains fixed MSK timezone:\n%s", prompt)
+	}
+}
+
 // TestOpenRouterParser_fallbackOn429 verifies that a 429 from the primary model
 // causes an immediate switch to the fallback model (no delay, no retry of primary).
 func TestOpenRouterParser_fallbackOn429(t *testing.T) {
@@ -53,11 +77,11 @@ func TestOpenRouterParser_fallbackOn429(t *testing.T) {
 	}))
 	defer server.Close()
 
-	parser, err := NewConfiguredLLMParser("openrouter", "test-key", primaryModel, server.URL, []string{fallbackModel}, 0, 0, time.UTC)
+	parser, err := NewConfiguredLLMParser("openrouter", "test-key", primaryModel, server.URL, []string{fallbackModel}, 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := parser.Parse(context.Background(), "test")
+	result, err := parser.Parse(context.Background(), "test", time.UTC)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,11 +128,11 @@ func TestOpenRouterParserFallsBackOnNonJSONProse(t *testing.T) {
 	}))
 	defer server.Close()
 
-	parser, err := NewConfiguredLLMParser("openrouter", "test-key", primaryModel, server.URL, []string{fallbackModel}, 0, 0, time.UTC)
+	parser, err := NewConfiguredLLMParser("openrouter", "test-key", primaryModel, server.URL, []string{fallbackModel}, 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := parser.Parse(context.Background(), "test")
+	result, err := parser.Parse(context.Background(), "test", time.UTC)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +148,7 @@ func TestClampTopN(t *testing.T) {
 	cases := []struct {
 		in, want int
 	}{
-		{0, 0},        // let orDefault apply its own default downstream
+		{0, 0}, // let orDefault apply its own default downstream
 		{-5, 0},
 		{1, 1},
 		{20, 20},
@@ -170,11 +194,11 @@ func TestOpenRouterParser_fallbackOn404(t *testing.T) {
 	}))
 	defer server.Close()
 
-	parser, err := NewConfiguredLLMParser("openrouter", "test-key", primaryModel, server.URL, []string{fallbackModel}, 0, 0, time.UTC)
+	parser, err := NewConfiguredLLMParser("openrouter", "test-key", primaryModel, server.URL, []string{fallbackModel}, 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := parser.Parse(context.Background(), "test")
+	result, err := parser.Parse(context.Background(), "test", time.UTC)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,11 +241,11 @@ func TestOpenRouterParserFallbackOnEmptyContent(t *testing.T) {
 	}))
 	defer server.Close()
 
-	parser, err := NewConfiguredLLMParser("openrouter", "test-key", primaryModel, server.URL, []string{fallbackModel}, 0, 0, time.UTC)
+	parser, err := NewConfiguredLLMParser("openrouter", "test-key", primaryModel, server.URL, []string{fallbackModel}, 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := parser.Parse(context.Background(), "test")
+	result, err := parser.Parse(context.Background(), "test", time.UTC)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -262,11 +286,11 @@ func TestOpenRouterParserFallbackOnSlowModel(t *testing.T) {
 	}))
 	defer server.Close()
 
-	parser, err := NewConfiguredLLMParser("openrouter", "test-key", primaryModel, server.URL, []string{fallbackModel}, 20*time.Millisecond, 0, time.UTC)
+	parser, err := NewConfiguredLLMParser("openrouter", "test-key", primaryModel, server.URL, []string{fallbackModel}, 20*time.Millisecond, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := parser.Parse(context.Background(), "test")
+	result, err := parser.Parse(context.Background(), "test", time.UTC)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -299,12 +323,12 @@ func TestOpenRouterParserLogsInitialModelAndFallback(t *testing.T) {
 	log := slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	parser, err := NewConfiguredLLMParser(
 		"openrouter", "test-key", primaryModel, server.URL,
-		[]string{fallbackModel}, 0, 0, time.UTC, log,
-	)
+		[]string{fallbackModel}, 0, 0, log)
+
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := parser.Parse(context.Background(), "test"); err != nil {
+	if _, err := parser.Parse(context.Background(), "test", time.UTC); err != nil {
 		t.Fatal(err)
 	}
 
@@ -338,19 +362,19 @@ func TestOpenRouterParser_allModelsRateLimited(t *testing.T) {
 
 	parser, err := NewConfiguredLLMParser(
 		"openrouter", "test-key", "m1/free", server.URL,
-		[]string{"m2/free", "m3/free"}, 0, 0, time.UTC,
-	)
+		[]string{"m2/free", "m3/free"}, 0, 0)
+
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := parser.Parse(context.Background(), "test"); err == nil {
+	if _, err := parser.Parse(context.Background(), "test", time.UTC); err == nil {
 		t.Fatal("expected error when all models are rate-limited")
 	}
 }
 
 func TestConfiguredLLMParserRejectsUnknownProvider(t *testing.T) {
 	t.Parallel()
-	if _, err := NewConfiguredLLMParser("unknown", "", "", "", nil, 0, 0, time.UTC); err == nil {
+	if _, err := NewConfiguredLLMParser("unknown", "", "", "", nil, 0, 0); err == nil {
 		t.Fatal("expected an error")
 	}
 }

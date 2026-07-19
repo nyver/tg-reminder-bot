@@ -22,16 +22,9 @@ var (
 
 // FastPath recognizes simple absolute and recurring reminders using regex.
 // Covers: «напомни [дата] в [время] [текст]» and «каждый [день/будний] в [время] [текст]».
-type FastPath struct {
-	loc *time.Location
-}
+type FastPath struct{}
 
-func NewFastPath(loc *time.Location) *FastPath {
-	if loc == nil {
-		loc = time.UTC
-	}
-	return &FastPath{loc: loc}
-}
+func NewFastPath() *FastPath { return &FastPath{} }
 
 var (
 	reTVAnchor = regexp.MustCompile(
@@ -63,7 +56,10 @@ var (
 	reTopN             = regexp.MustCompile(`(?i)топ[- ]?(\d+)|(\d+)\s+новост`)
 )
 
-func (p *FastPath) Parse(ctx context.Context, text string) (*ParseResult, error) {
+func (p *FastPath) Parse(ctx context.Context, text string, loc *time.Location) (*ParseResult, error) {
+	if loc == nil {
+		loc = time.UTC
+	}
 	text = strings.TrimSpace(text)
 
 	if m := reTVAnchor.FindStringSubmatch(text); m != nil {
@@ -79,7 +75,7 @@ func (p *FastPath) Parse(ctx context.Context, text string) (*ParseResult, error)
 		return p.parseRecurring(m), nil
 	}
 	if m := reAbsolute.FindStringSubmatch(text); m != nil {
-		return p.parseAbsolute(m), nil
+		return p.parseAbsolute(m, loc), nil
 	}
 	return &ParseResult{Spec: &domain.Spec{}, Confidence: 0}, nil
 }
@@ -278,12 +274,12 @@ func normalizeTVChannel(value string) string {
 	}
 }
 
-func (p *FastPath) parseAbsolute(m []string) *ParseResult {
+func (p *FastPath) parseAbsolute(m []string, loc *time.Location) *ParseResult {
 	// m[1]=day m[2]=month m[3]=year m[4]=relative m[5]=hour m[6]=min m[7]=sec m[8]=text
 	h, _ := strconv.Atoi(m[5])
 	min, _ := strconv.Atoi(m[6])
-	now := time.Now().In(p.loc)
-	target := time.Date(now.Year(), now.Month(), now.Day(), h, min, 0, 0, p.loc)
+	now := time.Now().In(loc)
+	target := time.Date(now.Year(), now.Month(), now.Day(), h, min, 0, 0, loc)
 
 	switch strings.ToLower(m[4]) {
 	case "завтра":
@@ -301,7 +297,7 @@ func (p *FastPath) parseAbsolute(m []string) *ParseResult {
 					year += 2000
 				}
 			}
-			target = time.Date(year, time.Month(month), day, h, min, 0, 0, p.loc)
+			target = time.Date(year, time.Month(month), day, h, min, 0, 0, loc)
 		} else if target.Before(now) {
 			target = target.AddDate(0, 0, 1)
 		}

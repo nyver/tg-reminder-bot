@@ -64,6 +64,10 @@ The last example creates a periodic RSS news digest — see
 [RSS news digest](#rss-news-digest) below for details; the same reminder can
 also be created directly with `/rss https://lenta.ru/rss | 18:00`.
 
+Relative dates and times in free-form messages are interpreted in the IANA
+timezone configured for that user with `/tz`. The current user timezone is
+passed to both the fast parser and the LLM prompt for every request.
+
 TV schedules can also be queried independently of reminders:
 
 ```text
