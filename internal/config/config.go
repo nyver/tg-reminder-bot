@@ -50,12 +50,13 @@ type OpenRouterConfig struct {
 }
 
 type ProvidersConfig struct {
-	TV      TVConfig      `yaml:"tv"`
-	IPTVX   IPTVXConfig   `yaml:"iptvx"`
-	Price   PriceConfig   `yaml:"price"`
-	Travel  TravelConfig  `yaml:"travel"`
-	RSS     RSSConfig     `yaml:"rss"`
-	Weather WeatherConfig `yaml:"weather"`
+	TV           TVConfig           `yaml:"tv"`
+	IPTVX        IPTVXConfig        `yaml:"iptvx"`
+	Price        PriceConfig        `yaml:"price"`
+	ExchangeRate ExchangeRateConfig `yaml:"exchange_rate"`
+	Travel       TravelConfig       `yaml:"travel"`
+	RSS          RSSConfig          `yaml:"rss"`
+	Weather      WeatherConfig      `yaml:"weather"`
 }
 
 type TVConfig struct {
@@ -78,6 +79,18 @@ type PriceConfig struct {
 	ProxyURL  string        `yaml:"proxy_url"`
 	// PollCron is the default cron schedule for price-drop reminders when the
 	// user does not specify an explicit interval. Standard 5-field cron syntax.
+	PollCron string `yaml:"poll_cron"`
+}
+
+type ExchangeRateConfig struct {
+	// CBRURL is the Bank of Russia daily fiat-rate XML endpoint.
+	CBRURL string `yaml:"cbr_url"`
+	// CoinGeckoURL is the CoinGecko simple-price endpoint.
+	CoinGeckoURL string `yaml:"coingecko_url"`
+	// CoinGeckoAPIKey is an optional Demo API key for higher public limits.
+	CoinGeckoAPIKey string        `yaml:"coingecko_api_key"`
+	Timeout         time.Duration `yaml:"timeout"`
+	// PollCron is the default schedule for fiat and cryptocurrency alerts.
 	PollCron string `yaml:"poll_cron"`
 }
 
@@ -210,6 +223,12 @@ func defaults() *Config {
 				Timeout:   15 * time.Second,
 				PollCron:  "0 * * * *", // every hour
 			},
+			ExchangeRate: ExchangeRateConfig{
+				CBRURL:       "https://www.cbr.ru/scripts/XML_daily.asp",
+				CoinGeckoURL: "https://api.coingecko.com/api/v3/simple/price",
+				Timeout:      10 * time.Second,
+				PollCron:     "0 * * * *",
+			},
 			Travel: TravelConfig{
 				Timeout:        10 * time.Second,
 				MaxHorizonDays: 180,
@@ -256,6 +275,9 @@ func applyEnvOverrides(cfg *Config) {
 	}
 	if v := os.Getenv("IPTVX_EPG_FILE"); v != "" {
 		cfg.Providers.IPTVX.FilePath = v
+	}
+	if v := os.Getenv("COINGECKO_API_KEY"); v != "" {
+		cfg.Providers.ExchangeRate.CoinGeckoAPIKey = v
 	}
 	if v := os.Getenv("DATABASE_DSN"); v != "" {
 		cfg.Database.DSN = v
@@ -329,6 +351,24 @@ func (cfg *Config) Validate() error {
 	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
 	if _, err := parser.Parse(cfg.Providers.Price.PollCron); err != nil {
 		return fmt.Errorf("config: providers.price.poll_cron is invalid: %w", err)
+	}
+	if cfg.Providers.ExchangeRate.Timeout <= 0 {
+		return fmt.Errorf("config: providers.exchange_rate.timeout must be positive")
+	}
+	for name, rawURL := range map[string]string{
+		"cbr_url":       cfg.Providers.ExchangeRate.CBRURL,
+		"coingecko_url": cfg.Providers.ExchangeRate.CoinGeckoURL,
+	} {
+		parsed, err := url.ParseRequestURI(rawURL)
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+			return fmt.Errorf("config: providers.exchange_rate.%s must be an HTTP(S) URL", name)
+		}
+	}
+	if strings.TrimSpace(cfg.Providers.ExchangeRate.PollCron) == "" {
+		return fmt.Errorf("config: providers.exchange_rate.poll_cron is required")
+	}
+	if _, err := parser.Parse(cfg.Providers.ExchangeRate.PollCron); err != nil {
+		return fmt.Errorf("config: providers.exchange_rate.poll_cron is invalid: %w", err)
 	}
 	if cfg.Providers.Travel.Timeout <= 0 {
 		return fmt.Errorf("config: providers.travel.timeout must be positive")

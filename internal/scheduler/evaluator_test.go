@@ -21,6 +21,7 @@ type metricProviderFunc func(context.Context, provider.Query) (provider.Measurem
 type temperatureMetricProviderFunc func(context.Context, provider.Query) (provider.Measurement, error)
 type weatherEventProviderFunc func(context.Context, provider.Query, time.Time, time.Time) ([]provider.Event, error)
 type weatherMetricProviderFunc func(context.Context, provider.Query) (provider.Measurement, error)
+type exchangeMetricProviderFunc func(context.Context, provider.Query) (provider.Measurement, error)
 
 func (eventProviderFunc) Type() string { return "tv_program" }
 
@@ -49,6 +50,12 @@ func (f weatherEventProviderFunc) Lookup(ctx context.Context, q provider.Query, 
 func (weatherMetricProviderFunc) Type() string { return "weather" }
 
 func (f weatherMetricProviderFunc) Sample(ctx context.Context, q provider.Query) (provider.Measurement, error) {
+	return f(ctx, q)
+}
+
+func (exchangeMetricProviderFunc) Type() string { return "exchange_rate" }
+
+func (f exchangeMetricProviderFunc) Sample(ctx context.Context, q provider.Query) (provider.Measurement, error) {
 	return f(ctx, q)
 }
 
@@ -150,6 +157,51 @@ func TestWeatherThresholdRendersCelsius(t *testing.T) {
 	}
 	if len(planned) != 1 || !strings.Contains(planned[0].Text, "-12.4 °C") || !strings.Contains(planned[0].Text, "ночью") {
 		t.Fatalf("planned = %+v", planned)
+	}
+}
+
+func TestExchangeRateThresholdRendersRateAndDailyPercent(t *testing.T) {
+	now := time.Date(2026, 7, 19, 8, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name        string
+		measurement provider.Measurement
+		previous    int64
+		target      int64
+		operator    string
+		params      map[string]string
+		wantText    string
+	}{
+		{
+			name: "fiat threshold", previous: 99_000_000, target: 100_000_000, operator: domain.ConditionOperatorGT,
+			measurement: provider.Measurement{Value: 101_250_000, Currency: "RUB", Available: true, Title: "EUR/RUB", Meta: map[string]string{"metric": "rate"}},
+			params:      map[string]string{"asset_type": "fiat", "base": "EUR", "quote": "RUB", "metric": "rate"}, wantText: "101.25 RUB",
+		},
+		{
+			name: "crypto daily fall", previous: -200, target: -500, operator: domain.ConditionOperatorLTE,
+			measurement: provider.Measurement{Value: -513, Currency: "%", Available: true, Title: "Bitcoin", Meta: map[string]string{"metric": "change_24h"}},
+			params:      map[string]string{"asset_type": "crypto", "base": "bitcoin", "quote": "RUB", "metric": "change_24h"}, wantText: "-5.13%",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			registry := provider.NewRegistry()
+			registry.RegisterMetric(exchangeMetricProviderFunc(func(context.Context, provider.Query) (provider.Measurement, error) {
+				return test.measurement, nil
+			}))
+			evaluator := NewEvaluator(registry, &fixedHistory{last: &domain.Observation{Value: test.previous}}, clock.NewFake(now), 180, nil)
+			planned, err := evaluator.Evaluate(context.Background(), domain.Reminder{
+				ID: uuid.New(), UserID: 42, Kind: domain.KindConditional,
+				Spec: domain.Spec{Trigger: domain.TriggerThreshold,
+					Condition: &domain.Condition{Operator: test.operator, Target: &test.target, EdgeTriggered: true},
+					Event:     domain.EventSpec{Type: "exchange_rate", Params: test.params}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(planned) != 1 || !strings.Contains(planned[0].Text, test.wantText) {
+				t.Fatalf("planned = %+v", planned)
+			}
+		})
 	}
 }
 

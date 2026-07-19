@@ -35,6 +35,9 @@ func TestLoadYAMLUsesSQLiteDefaults(t *testing.T) {
 	if cfg.Providers.Weather.DefaultLocation != "Moscow" || cfg.Providers.Weather.PollCron != "0 * * * *" {
 		t.Fatalf("unexpected weather config: %+v", cfg.Providers.Weather)
 	}
+	if cfg.Providers.ExchangeRate.CBRURL == "" || cfg.Providers.ExchangeRate.CoinGeckoURL == "" || cfg.Providers.ExchangeRate.PollCron != "0 * * * *" {
+		t.Fatalf("unexpected exchange rate config: %+v", cfg.Providers.ExchangeRate)
+	}
 }
 
 func TestValidateRejectsInvalidProxyURLs(t *testing.T) {
@@ -95,6 +98,27 @@ func TestValidateRejectsInvalidWeatherConfig(t *testing.T) {
 		{"invalid geocoding URL", func(c *Config) { c.Providers.Weather.GeocodingURL = "://bad" }},
 		{"invalid poll cron", func(c *Config) { c.Providers.Weather.PollCron = "sometimes" }},
 		{"invalid timeout", func(c *Config) { c.Providers.Weather.Timeout = 0 }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := defaults()
+			test.apply(cfg)
+			if err := cfg.Validate(); err == nil {
+				t.Fatal("expected validation error")
+			}
+		})
+	}
+}
+
+func TestValidateRejectsInvalidExchangeRateConfig(t *testing.T) {
+	tests := []struct {
+		name  string
+		apply func(*Config)
+	}{
+		{"invalid CBR URL", func(c *Config) { c.Providers.ExchangeRate.CBRURL = "file:///tmp/rates" }},
+		{"invalid CoinGecko URL", func(c *Config) { c.Providers.ExchangeRate.CoinGeckoURL = "://bad" }},
+		{"invalid poll cron", func(c *Config) { c.Providers.ExchangeRate.PollCron = "sometimes" }},
+		{"invalid timeout", func(c *Config) { c.Providers.ExchangeRate.Timeout = 0 }},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

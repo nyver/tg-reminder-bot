@@ -175,6 +175,49 @@ func TestFastPathParsesURLPriceDrop(t *testing.T) {
 	}
 }
 
+func TestFastPathParsesFiatAndCryptoRateAlerts(t *testing.T) {
+	t.Parallel()
+	parser := NewFastPath()
+
+	fiat, err := parser.Parse(context.Background(), "уведоми, когда евро станет выше 100 рублей", time.UTC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fiat.Kind != domain.KindConditional || fiat.Spec.Event.Type != "exchange_rate" || fiat.Spec.Event.Params["base"] != "EUR" {
+		t.Fatalf("fiat result = %+v, spec = %+v", fiat, fiat.Spec)
+	}
+	if condition := fiat.Spec.Condition; condition == nil || condition.Operator != domain.ConditionOperatorGT || condition.Target == nil || *condition.Target != 100_000_000 {
+		t.Fatalf("fiat condition = %+v", condition)
+	}
+
+	crypto, err := parser.Parse(context.Background(), "сообщи, если биткоин упадёт на 5% за день", time.UTC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if crypto.Spec.Event.Type != "exchange_rate" || crypto.Spec.Event.Params["asset_type"] != "crypto" || crypto.Spec.Event.Params["metric"] != "change_24h" {
+		t.Fatalf("crypto result = %+v, spec = %+v", crypto, crypto.Spec)
+	}
+	if condition := crypto.Spec.Condition; condition == nil || condition.Operator != domain.ConditionOperatorLTE || condition.Target == nil || *condition.Target != -500 {
+		t.Fatalf("crypto condition = %+v", condition)
+	}
+
+	cryptoRate, err := parser.Parse(context.Background(), "сообщи, когда биткоин станет ниже 5000000 рублей", time.UTC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cryptoRate.Spec.Event.Params["metric"] != "rate" || cryptoRate.Spec.Condition.Target == nil || *cryptoRate.Spec.Condition.Target != 5_000_000_000_000 {
+		t.Fatalf("crypto rate result = %+v, spec = %+v", cryptoRate, cryptoRate.Spec)
+	}
+
+	growth, err := parser.Parse(context.Background(), "сообщи, если биткоин вырастет на 7,5% за сутки", time.UTC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if growth.Spec.Condition.Operator != domain.ConditionOperatorGTE || growth.Spec.Condition.Target == nil || *growth.Spec.Condition.Target != 750 {
+		t.Fatalf("crypto growth condition = %+v", growth.Spec.Condition)
+	}
+}
+
 func TestFastPathParsesRSSDigest(t *testing.T) {
 	t.Parallel()
 	parser := NewFastPath()
@@ -391,6 +434,35 @@ func TestMapToResultDefaultsConditionToEdgeTriggered(t *testing.T) {
 	}
 	if result.Spec.Condition == nil || !result.Spec.Condition.EdgeTriggered {
 		t.Fatalf("condition = %+v", result.Spec.Condition)
+	}
+}
+
+func TestMapToResultScalesExchangeRateTargets(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		metric string
+		target int64
+		want   int64
+	}{
+		{name: "fiat rate", metric: "rate", target: 100, want: 100_000_000},
+		{name: "daily percentage", metric: "change_24h", target: -5, want: -500},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			target := test.target
+			result, err := mapToResult(&llmResponse{
+				Kind: "conditional", Trigger: "threshold", Confidence: 0.95,
+				Condition: &llmCondition{Operator: domain.ConditionOperatorLTE, Target: &target},
+				Event: llmEvent{Type: "exchange_rate", Params: map[string]string{
+					"asset_type": "crypto", "base": "bitcoin", "quote": "RUB", "metric": test.metric,
+				}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := *result.Spec.Condition.Target; got != test.want {
+				t.Fatalf("target = %d, want %d", got, test.want)
+			}
+		})
 	}
 }
 

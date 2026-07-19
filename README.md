@@ -184,6 +184,7 @@ variables:
 | --- | --- |
 | `TELEGRAM_TOKEN` | Telegram bot token |
 | `LLM_API_KEY` | OpenRouter or Anthropic key |
+| `COINGECKO_API_KEY` | optional CoinGecko Demo API key |
 | `EPG_SERVICE_API_KEY` | EPG Service Bearer token |
 | `EPG_SERVICE_BASE_URL` | override for the EPG Service API base URL |
 | `IPTVX_EPG_URL` | XMLTV/XMLTV.GZ URL for the primary TV provider |
@@ -323,10 +324,58 @@ behavior. Legacy specs with top-level `target` and `direction` remain readable;
 `below` maps to `lt`, `above` maps to `gt`, and an omitted direction retains
 the historical lower-than-previous behavior.
 
-The repository includes price and weather metric providers. Other examples
-such as exchange rates, stock availability, and page hashes need a
-corresponding `MetricProvider`, but use the same evaluator without further
-scheduler changes.
+The repository includes price, weather, and exchange-rate metric providers.
+Other examples such as stock availability and page hashes need a corresponding
+`MetricProvider`, but use the same evaluator without scheduler changes.
+
+## Fiat and cryptocurrency rate monitoring
+
+The `exchange_rate` metric provider supports fiat cross-rates and
+cryptocurrency prices. It also exposes CoinGecko's rolling 24-hour percentage
+change as a scalar metric, so directional daily-change alerts use the same
+generic threshold evaluator as prices and temperatures.
+
+Supported free-text scenarios include:
+
+```text
+уведоми, когда евро станет выше 100 рублей
+сообщи, когда биткоин станет ниже 5000000 рублей
+сообщи, если биткоин упадёт на 5% за день
+```
+
+The first request creates an edge-triggered `gt` condition for `EUR/RUB`.
+Exchange rates are stored with six decimal places (`100 RUB = 100000000`).
+The second request monitors Bitcoin's current RUB price. The third evaluates
+Bitcoin's rolling RUB-denominated 24-hour change and creates an edge-triggered
+`lte` condition at `-5%`; percentage metrics are
+stored with two decimal places (`-5% = -500`). The first successful sample
+establishes the edge baseline, and the notification is sent when the metric
+subsequently crosses the threshold.
+
+Fiat rates come from the official [Bank of Russia daily XML feed](https://www.cbr.ru/development/SXML/). The provider
+can derive cross-rates between currencies published in that feed, with RUB as
+the common reference. Cryptocurrency prices and 24-hour changes come from the
+CoinGecko [Simple Price API](https://docs.coingecko.com/reference/simple-price). CoinGecko's keyless public endpoint works without
+a key; `COINGECKO_API_KEY` or `coingecko_api_key` can supply an optional Demo
+API key when higher public limits are needed.
+
+```yaml
+providers:
+  exchange_rate:
+    cbr_url: https://www.cbr.ru/scripts/XML_daily.asp
+    coingecko_url: https://api.coingecko.com/api/v3/simple/price
+    coingecko_api_key: "${COINGECKO_API_KEY}"
+    timeout: 10s
+    poll_cron: "0 * * * *"
+```
+
+| Field | Description | Default |
+| --- | --- | --- |
+| `cbr_url` | Bank of Russia-compatible daily fiat-rate XML endpoint | official Bank of Russia endpoint |
+| `coingecko_url` | CoinGecko-compatible Simple Price endpoint | keyless public CoinGecko endpoint |
+| `coingecko_api_key` | optional CoinGecko Demo API key | `""` |
+| `timeout` | timeout for one upstream request | `10s` |
+| `poll_cron` | default alert schedule in the user's timezone | `"0 * * * *"` |
 
 ## Weather forecasts and alerts
 

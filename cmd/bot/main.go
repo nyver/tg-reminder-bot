@@ -12,6 +12,7 @@ import (
 	"github.com/nyver2k/remindertgbot/internal/nlu"
 	"github.com/nyver2k/remindertgbot/internal/observability"
 	"github.com/nyver2k/remindertgbot/internal/provider"
+	"github.com/nyver2k/remindertgbot/internal/provider/exchangerate"
 	"github.com/nyver2k/remindertgbot/internal/provider/iptvx"
 	"github.com/nyver2k/remindertgbot/internal/provider/price"
 	"github.com/nyver2k/remindertgbot/internal/provider/rss"
@@ -87,6 +88,15 @@ func main() {
 		}, log))
 	}
 	registry.RegisterMetric(priceProber)
+	exchangeRateProvider, err := exchangerate.New(exchangerate.Config{
+		CBRURL: cfg.Providers.ExchangeRate.CBRURL, CoinGeckoURL: cfg.Providers.ExchangeRate.CoinGeckoURL,
+		CoinGeckoAPIKey: cfg.Providers.ExchangeRate.CoinGeckoAPIKey, Timeout: cfg.Providers.ExchangeRate.Timeout,
+	})
+	if err != nil {
+		log.Error("exchange rate provider init", "err", err)
+		os.Exit(1)
+	}
+	registry.RegisterMetric(exchangeRateProvider)
 	airP := travel.NewAirProvider(cfg.Providers.Travel.AirAPIKey, log)
 	railP := travel.NewRailProvider(cfg.Providers.Travel.RailAPIKey, log)
 	registry.RegisterSearch(travel.NewAggregator(log, airP, railP))
@@ -129,6 +139,7 @@ func main() {
 		tvScheduler,
 		evaluator,
 		cfg.Providers.Price.PollCron,
+		cfg.Providers.ExchangeRate.PollCron,
 		cfg.Providers.Weather.PollCron,
 		cfg.Providers.Weather.DefaultLocation,
 		log,

@@ -15,6 +15,7 @@ import (
 	"github.com/nyver2k/remindertgbot/internal/nlu"
 	"github.com/nyver2k/remindertgbot/internal/observability"
 	"github.com/nyver2k/remindertgbot/internal/provider"
+	"github.com/nyver2k/remindertgbot/internal/provider/exchangerate"
 	"github.com/nyver2k/remindertgbot/internal/provider/iptvx"
 	"github.com/nyver2k/remindertgbot/internal/provider/price"
 	"github.com/nyver2k/remindertgbot/internal/provider/rss"
@@ -76,6 +77,15 @@ func main() {
 	priceProber := price.New(cfg.Providers.Price.UserAgent, cfg.Providers.Price.Timeout, cfg.Providers.Price.Headless, cfg.Providers.Price.ProxyURL, log)
 	defer priceProber.Close()
 	registry.RegisterMetric(priceProber)
+	exchangeRateProvider, err := exchangerate.New(exchangerate.Config{
+		CBRURL: cfg.Providers.ExchangeRate.CBRURL, CoinGeckoURL: cfg.Providers.ExchangeRate.CoinGeckoURL,
+		CoinGeckoAPIKey: cfg.Providers.ExchangeRate.CoinGeckoAPIKey, Timeout: cfg.Providers.ExchangeRate.Timeout,
+	})
+	if err != nil {
+		log.Error("exchange rate provider init", "err", err)
+		os.Exit(1)
+	}
+	registry.RegisterMetric(exchangeRateProvider)
 
 	airP := travel.NewAirProvider(cfg.Providers.Travel.AirAPIKey, log)
 	railP := travel.NewRailProvider(cfg.Providers.Travel.RailAPIKey, log)

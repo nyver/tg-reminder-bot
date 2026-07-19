@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/url"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/nyver2k/remindertgbot/internal/domain"
+	"github.com/nyver2k/remindertgbot/internal/provider/exchangerate"
 )
 
 // LLMParser uses a configured LLM to parse free-form Russian reminder text into a Spec.
@@ -449,12 +451,12 @@ func buildPrompt(text string, now time.Time) string {
   top_n       5                               (для digest)
   horizon_days 30                             (для digest/anchor)
   condition.operator lt|lte|gt|gte|changed|changed_pct (для threshold)
-  condition.target 5000000                    (для сравнений; цена в копейках, температура в °C)
+  condition.target 5000000                    (для сравнений; цена в копейках, температура/курс/%% — в единицах пользователя)
   condition.change_percent 10                 (для changed_pct, проценты)
   condition.edge_triggered true|false          (по умолчанию true)
   condition.cooldown "6h"                     (обязательно для edge_triggered=false)
   currency    RUB|USD|EUR                       (если метрика является ценой или курсом)
-  event.type  tv_program|price|rss|weather    (для conditional)
+  event.type  tv_program|price|rss|weather|exchange_rate (для conditional)
   event.title название                        (для tv_program/price)
   event.params {"url":"..."} и т.д. (для rss с несколькими лентами — через запятую: "url1,url2")
   confidence  0.0-1.0                         (обязательно)
@@ -470,6 +472,9 @@ func buildPrompt(text string, now time.Time) string {
 - «уведоми, когда цена станет ниже 50 000 ₽» + URL → condition.operator=lt, condition.target=5000000, condition.edge_triggered=true
 - «повторяй, пока цена ниже 50 000 ₽, но не чаще раза в день» + URL → condition.operator=lt, condition.target=5000000, condition.edge_triggered=false, condition.cooldown="24h"
 - «сообщи, если цена изменится больше чем на 10%%» + URL → condition.operator=changed_pct, condition.change_percent=10, condition.edge_triggered=true
+- «уведоми, когда евро станет выше 100 рублей» → kind=conditional, trigger=threshold, event.type=exchange_rate, event.title="EUR/RUB", event.params.asset_type=fiat, event.params.base=EUR, event.params.quote=RUB, event.params.metric=rate, condition.operator=gt, condition.target=100, condition.edge_triggered=true, currency=RUB
+- «сообщи, когда биткоин станет ниже 5000000 рублей» → kind=conditional, trigger=threshold, event.type=exchange_rate, event.title="Bitcoin/RUB", event.params.asset_type=crypto, event.params.base=bitcoin, event.params.quote=RUB, event.params.metric=rate, condition.operator=lt, condition.target=5000000, condition.edge_triggered=true, currency=RUB
+- «сообщи, если биткоин упадёт на 5%% за день» → kind=conditional, trigger=threshold, event.type=exchange_rate, event.title="Bitcoin — изменение за 24 часа", event.params.asset_type=crypto, event.params.base=bitcoin, event.params.quote=RUB, event.params.metric=change_24h, condition.operator=lte, condition.target=-5, condition.edge_triggered=true, currency=%%
 - «каждые 2 часа» при снижении цены → eval_cron="0 */2 * * *"
 - «каждые 30 минут» при снижении цены → eval_cron="*/30 * * * *"
 - «каждый час» / «раз в час» при снижении цены → eval_cron="0 * * * *"
@@ -562,6 +567,17 @@ func mapToResult(resp *llmResponse) (*ParseResult, error) {
 			tenths := *condition.Target * 10
 			condition.Target = &tenths
 		}
+		if resp.Event.Type == "exchange_rate" && condition.Target != nil {
+			scale := exchangerate.RateScale
+			if resp.Event.Params["metric"] == "change_24h" {
+				scale = exchangerate.PercentScale
+			}
+			scaled, ok := scaledInt(*condition.Target, scale)
+			if !ok {
+				return nil, fmt.Errorf("exchange rate condition target is out of range")
+			}
+			condition.Target = &scaled
+		}
 		if resp.Condition.Cooldown != "" {
 			cooldown, err := time.ParseDuration(resp.Condition.Cooldown)
 			if err != nil {
@@ -593,6 +609,8 @@ func mapToResult(resp *llmResponse) (*ParseResult, error) {
 			} else {
 				spec.Trigger = domain.TriggerAnchor
 			}
+		case "exchange_rate":
+			spec.Trigger = domain.TriggerThreshold
 		}
 	}
 
@@ -643,4 +661,11 @@ func mapToResult(resp *llmResponse) (*ParseResult, error) {
 		result.FireAt = &resp.FireAt
 	}
 	return result, nil
+}
+
+func scaledInt(value, scale int64) (int64, bool) {
+	if (value > 0 && value > math.MaxInt64/scale) || (value < 0 && value < math.MinInt64/scale) {
+		return 0, false
+	}
+	return value * scale, true
 }

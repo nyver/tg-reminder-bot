@@ -108,7 +108,7 @@ func (c Condition) Validate() error {
 
 // EventSpec — параметры источника данных.
 type EventSpec struct {
-	Type   string            `json:"type"` // tv_program | price | travel | rss | weather
+	Type   string            `json:"type"` // tv_program | price | travel | rss | weather | exchange_rate
 	Title  string            `json:"title"`
 	Params map[string]string `json:"params"`
 }

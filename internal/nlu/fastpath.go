@@ -3,12 +3,14 @@ package nlu
 import (
 	"context"
 	"fmt"
+	"math"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/nyver2k/remindertgbot/internal/domain"
+	"github.com/nyver2k/remindertgbot/internal/provider/exchangerate"
 )
 
 var (
@@ -59,6 +61,9 @@ var (
 	reWeatherRain      = regexp.MustCompile(`(?i)дожд`)
 	reWeatherThreshold = regexp.MustCompile(`(?i)(ниже|меньше|выше|больше)\s+(?:чем\s+)?(-?\d+)`)
 	reWeatherCity      = regexp.MustCompile(`(?i)(?:в|для)\s+город(?:е|а)?\s+([\p{L}-]+(?:\s+[\p{L}-]+)?)`)
+	reFiatRateAlert    = regexp.MustCompile(`(?i)(?:курс\s+)?(евро|eur|доллар(?:а|ов|ы)?|usd|юан[ья]|cny|фунт(?:а|ов)?|gbp|иен[аы]?|йен[аы]?|jpy|франк(?:а|ов)?|chf|тенге|kzt)\s+(?:станет\s+|будет\s+)?(выше|больше|ниже|меньше)\s+(\d+(?:[.,]\d+)?)\s*(руб(?:ля|лей|ль|\.)?|rub|₽)`)
+	reCryptoRateAlert  = regexp.MustCompile(`(?i)(биткоин|bitcoin|btc|эфириум|ethereum|ether|eth|солана|solana|sol)\s+(?:станет\s+|будет\s+)?(выше|больше|ниже|меньше)\s+(\d+(?:[.,]\d+)?)\s*(руб(?:ля|лей|ль|\.)?|rub|₽)`)
+	reCryptoDayChange  = regexp.MustCompile(`(?i)(биткоин|bitcoin|btc|эфириум|ethereum|ether|eth|солана|solana|sol)\s+(упад[её]т|снизится|вырастет|поднимется)\s+(?:как\s+минимум\s+)?на\s+(\d+(?:[.,]\d+)?)\s*%\s+(?:за\s+)?(?:день|сутки|24\s*час(?:а|ов)?)`)
 )
 
 func (p *FastPath) Parse(ctx context.Context, text string, loc *time.Location) (*ParseResult, error) {
@@ -67,6 +72,9 @@ func (p *FastPath) Parse(ctx context.Context, text string, loc *time.Location) (
 	}
 	text = strings.TrimSpace(text)
 
+	if r := parseExchangeRate(text); r != nil {
+		return r, nil
+	}
 	if r := parseWeather(text, loc); r != nil {
 		return r, nil
 	}
@@ -86,6 +94,119 @@ func (p *FastPath) Parse(ctx context.Context, text string, loc *time.Location) (
 		return p.parseAbsolute(m, loc), nil
 	}
 	return &ParseResult{Spec: &domain.Spec{}, Confidence: 0}, nil
+}
+
+func parseExchangeRate(text string) *ParseResult {
+	if match := reFiatRateAlert.FindStringSubmatch(text); match != nil {
+		base, title := fiatCode(match[1])
+		targetValue, ok := scaledDecimal(match[3], exchangerate.RateScale)
+		if base == "" || !ok || targetValue <= 0 {
+			return nil
+		}
+		operator := domain.ConditionOperatorGT
+		if direction := strings.ToLower(match[2]); direction == "ниже" || direction == "меньше" {
+			operator = domain.ConditionOperatorLT
+		}
+		return &ParseResult{
+			Kind: domain.KindConditional, EvalCron: parsePollCron(text), Confidence: 0.98,
+			Spec: &domain.Spec{
+				Trigger: domain.TriggerThreshold, Message: strings.TrimSpace(text), Currency: "RUB",
+				Condition: &domain.Condition{Operator: operator, Target: &targetValue, EdgeTriggered: true},
+				Event: domain.EventSpec{Type: "exchange_rate", Title: title + "/RUB", Params: map[string]string{
+					"asset_type": "fiat", "base": base, "quote": "RUB", "metric": "rate",
+				}},
+			},
+		}
+	}
+	if match := reCryptoRateAlert.FindStringSubmatch(text); match != nil {
+		coinID, title := cryptoID(match[1])
+		targetValue, ok := scaledDecimal(match[3], exchangerate.RateScale)
+		if coinID == "" || !ok || targetValue <= 0 {
+			return nil
+		}
+		operator := domain.ConditionOperatorGT
+		if direction := strings.ToLower(match[2]); direction == "ниже" || direction == "меньше" {
+			operator = domain.ConditionOperatorLT
+		}
+		return &ParseResult{
+			Kind: domain.KindConditional, EvalCron: parsePollCron(text), Confidence: 0.98,
+			Spec: &domain.Spec{
+				Trigger: domain.TriggerThreshold, Message: strings.TrimSpace(text), Currency: "RUB",
+				Condition: &domain.Condition{Operator: operator, Target: &targetValue, EdgeTriggered: true},
+				Event: domain.EventSpec{Type: "exchange_rate", Title: title + "/RUB", Params: map[string]string{
+					"asset_type": "crypto", "base": coinID, "quote": "RUB", "metric": "rate",
+				}},
+			},
+		}
+	}
+
+	if match := reCryptoDayChange.FindStringSubmatch(text); match != nil {
+		coinID, title := cryptoID(match[1])
+		percent, ok := scaledDecimal(match[3], exchangerate.PercentScale)
+		if coinID == "" || !ok || percent <= 0 {
+			return nil
+		}
+		operator := domain.ConditionOperatorGTE
+		target := percent
+		direction := strings.ToLower(match[2])
+		if strings.HasPrefix(direction, "упад") || strings.HasPrefix(direction, "сниз") {
+			operator = domain.ConditionOperatorLTE
+			target = -percent
+		}
+		return &ParseResult{
+			Kind: domain.KindConditional, EvalCron: parsePollCron(text), Confidence: 0.98,
+			Spec: &domain.Spec{
+				Trigger: domain.TriggerThreshold, Message: strings.TrimSpace(text), Currency: "%",
+				Condition: &domain.Condition{Operator: operator, Target: &target, EdgeTriggered: true},
+				Event: domain.EventSpec{Type: "exchange_rate", Title: title + " — изменение за 24 часа", Params: map[string]string{
+					"asset_type": "crypto", "base": coinID, "quote": "RUB", "metric": "change_24h",
+				}},
+			},
+		}
+	}
+	return nil
+}
+
+func fiatCode(value string) (code, title string) {
+	switch strings.ToLower(value) {
+	case "евро", "eur":
+		return "EUR", "EUR"
+	case "доллар", "доллара", "доллары", "долларов", "usd":
+		return "USD", "USD"
+	case "юань", "юаня", "cny":
+		return "CNY", "CNY"
+	case "фунт", "фунта", "фунтов", "gbp":
+		return "GBP", "GBP"
+	case "иена", "иены", "йена", "йены", "jpy":
+		return "JPY", "JPY"
+	case "франк", "франка", "франков", "chf":
+		return "CHF", "CHF"
+	case "тенге", "kzt":
+		return "KZT", "KZT"
+	default:
+		return "", ""
+	}
+}
+
+func cryptoID(value string) (id, title string) {
+	switch strings.ToLower(value) {
+	case "биткоин", "bitcoin", "btc":
+		return "bitcoin", "Bitcoin"
+	case "эфириум", "ethereum", "ether", "eth":
+		return "ethereum", "Ethereum"
+	case "солана", "solana", "sol":
+		return "solana", "Solana"
+	default:
+		return "", ""
+	}
+}
+
+func scaledDecimal(value string, scale int64) (int64, bool) {
+	n, err := strconv.ParseFloat(strings.ReplaceAll(value, ",", "."), 64)
+	if err != nil || math.IsNaN(n) || math.IsInf(n, 0) || n > float64(math.MaxInt64)/float64(scale) {
+		return 0, false
+	}
+	return int64(math.Round(n * float64(scale))), true
 }
 
 func parseWeather(text string, loc *time.Location) *ParseResult {

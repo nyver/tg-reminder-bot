@@ -17,6 +17,7 @@ import (
 	"github.com/nyver2k/remindertgbot/internal/clock"
 	"github.com/nyver2k/remindertgbot/internal/domain"
 	"github.com/nyver2k/remindertgbot/internal/provider"
+	"github.com/nyver2k/remindertgbot/internal/provider/exchangerate"
 )
 
 // PlannedNotification is the evaluator output before persistence.
@@ -594,6 +595,30 @@ func renderConditionText(spec domain.Spec, condition domain.Condition, m provide
 		}
 		return sb.String()
 	}
+	if spec.Event.Type == "exchange_rate" {
+		metric := m.Meta["metric"]
+		if metric == "" {
+			metric = spec.Event.Params["metric"]
+		}
+		value := formatExchangeValue(m.Value, m.Currency, metric)
+		var sb strings.Builder
+		if metric == "change_24h" {
+			sb.WriteString("📊 Изменение криптовалюты за 24 часа достигло порога!\n")
+		} else {
+			sb.WriteString("💱 Курс достиг заданного уровня!\n")
+		}
+		if title != "" {
+			sb.WriteString(title + "\n")
+		}
+		sb.WriteString("Значение: *" + value + "*")
+		if prev != nil {
+			sb.WriteString(" (предыдущее: " + formatExchangeValue(prev.Value, m.Currency, metric) + ")")
+		}
+		if spec.Message != "" {
+			sb.WriteString("\n" + spec.Message)
+		}
+		return sb.String()
+	}
 
 	value := formatMetricValue(m.Value, m.Currency)
 	var sb strings.Builder
@@ -613,6 +638,19 @@ func renderConditionText(spec domain.Spec, condition domain.Condition, m provide
 
 func formatTemperature(value int64) string {
 	return strconv.FormatFloat(float64(value)/10, 'f', 1, 64) + " °C"
+}
+
+func formatExchangeValue(value int64, currency, metric string) string {
+	if metric == "change_24h" {
+		return trimDecimal(float64(value)/float64(exchangerate.PercentScale), 2) + "%"
+	}
+	return trimDecimal(float64(value)/float64(exchangerate.RateScale), 6) + " " + strings.ToUpper(currency)
+}
+
+func trimDecimal(value float64, precision int) string {
+	formatted := strconv.FormatFloat(value, 'f', precision, 64)
+	formatted = strings.TrimRight(formatted, "0")
+	return strings.TrimRight(formatted, ".")
 }
 
 func formatMetricValue(value int64, currency string) string {

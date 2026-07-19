@@ -532,6 +532,59 @@ func TestFormatSpecShowsWeatherThresholdContext(t *testing.T) {
 	}
 }
 
+func TestExchangeRateSpecValidationAndFormatting(t *testing.T) {
+	target := int64(-500)
+	result := &nlu.ParseResult{Kind: domain.KindConditional, Confidence: 0.98, Spec: &domain.Spec{
+		Trigger:   domain.TriggerThreshold,
+		Condition: &domain.Condition{Operator: domain.ConditionOperatorLTE, Target: &target, EdgeTriggered: true},
+		Event: domain.EventSpec{Type: "exchange_rate", Title: "Bitcoin — изменение за 24 часа", Params: map[string]string{
+			"asset_type": "crypto", "base": "bitcoin", "quote": "RUB", "metric": "change_24h",
+		}},
+	}}
+	if err := validateParseResult(result); err != nil {
+		t.Fatal(err)
+	}
+	got := formatSpec(result.Spec)
+	for _, want := range []string{"Bitcoin", "Падение за 24 часа не меньше 5%"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("formatSpec() = %q, want substring %q", got, want)
+		}
+	}
+
+	result.Spec.Event.Params["metric"] = "unknown"
+	if err := validateParseResult(result); err == nil {
+		t.Fatal("expected unsupported metric error")
+	}
+
+	rateTarget := int64(100_000_000)
+	rateResult := &nlu.ParseResult{Kind: domain.KindConditional, Confidence: 0.98, Spec: &domain.Spec{
+		Trigger:   domain.TriggerThreshold,
+		Condition: &domain.Condition{Operator: domain.ConditionOperatorGT, Target: &rateTarget, EdgeTriggered: true},
+		Event: domain.EventSpec{Type: "exchange_rate", Title: "EUR/RUB", Params: map[string]string{
+			"asset_type": "fiat", "base": "EUR", "quote": "RUB", "metric": "rate",
+		}},
+	}}
+	if err := validateParseResult(rateResult); err != nil {
+		t.Fatalf("valid fiat rate rejected: %v", err)
+	}
+}
+
+func TestReminderIdempotencyIncludesCondition(t *testing.T) {
+	low, high := int64(90_000_000), int64(100_000_000)
+	base := domain.Reminder{UserID: 42, Kind: domain.KindConditional, Spec: domain.Spec{
+		Trigger: domain.TriggerThreshold,
+		Event: domain.EventSpec{Type: "exchange_rate", Title: "EUR/RUB", Params: map[string]string{
+			"asset_type": "fiat", "base": "EUR", "quote": "RUB", "metric": "rate",
+		}},
+	}}
+	below, above := base, base
+	below.Spec.Condition = &domain.Condition{Operator: domain.ConditionOperatorLT, Target: &low, EdgeTriggered: true}
+	above.Spec.Condition = &domain.Condition{Operator: domain.ConditionOperatorGT, Target: &high, EdgeTriggered: true}
+	if reminderIdemKey(&below) == reminderIdemKey(&above) {
+		t.Fatal("different conditions produced the same reminder idempotency key")
+	}
+}
+
 func TestValidateParseResultRejectsRSSWithoutURL(t *testing.T) {
 	result := &nlu.ParseResult{
 		Confidence: 0.97,

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/url"
 	"sort"
 	"strconv"
@@ -17,6 +18,7 @@ import (
 	"github.com/nyver2k/remindertgbot/internal/domain"
 	"github.com/nyver2k/remindertgbot/internal/nlu"
 	"github.com/nyver2k/remindertgbot/internal/provider"
+	"github.com/nyver2k/remindertgbot/internal/provider/exchangerate"
 	"github.com/nyver2k/remindertgbot/internal/scheduler"
 	"github.com/robfig/cron/v3"
 	tele "gopkg.in/telebot.v3"
@@ -50,18 +52,19 @@ type PriceProber interface {
 }
 
 type Handler struct {
-	reminders              ReminderService
-	users                  UserService
-	dialogs                DialogStore
-	parser                 nlu.Parser
-	prices                 PriceProber          // optional
-	history                PriceHistory         // optional, for /refresh delta
-	schedule               provider.TVScheduler // optional
-	evaluator              *scheduler.Evaluator // optional, for /run
-	priceDefaultPollCron   string
-	weatherDefaultPollCron string
-	weatherDefaultLocation string
-	log                    *slog.Logger
+	reminders               ReminderService
+	users                   UserService
+	dialogs                 DialogStore
+	parser                  nlu.Parser
+	prices                  PriceProber          // optional
+	history                 PriceHistory         // optional, for /refresh delta
+	schedule                provider.TVScheduler // optional
+	evaluator               *scheduler.Evaluator // optional, for /run
+	priceDefaultPollCron    string
+	exchangeDefaultPollCron string
+	weatherDefaultPollCron  string
+	weatherDefaultLocation  string
+	log                     *slog.Logger
 }
 
 func NewHandler(
@@ -74,23 +77,25 @@ func NewHandler(
 	schedule provider.TVScheduler,
 	evaluator *scheduler.Evaluator,
 	priceDefaultPollCron string,
+	exchangeDefaultPollCron string,
 	weatherDefaultPollCron string,
 	weatherDefaultLocation string,
 	log *slog.Logger,
 ) *Handler {
 	return &Handler{
-		reminders:              reminders,
-		users:                  users,
-		dialogs:                dialogs,
-		parser:                 parser,
-		prices:                 prices,
-		history:                history,
-		schedule:               schedule,
-		evaluator:              evaluator,
-		priceDefaultPollCron:   priceDefaultPollCron,
-		weatherDefaultPollCron: weatherDefaultPollCron,
-		weatherDefaultLocation: weatherDefaultLocation,
-		log:                    log,
+		reminders:               reminders,
+		users:                   users,
+		dialogs:                 dialogs,
+		parser:                  parser,
+		prices:                  prices,
+		history:                 history,
+		schedule:                schedule,
+		evaluator:               evaluator,
+		priceDefaultPollCron:    priceDefaultPollCron,
+		exchangeDefaultPollCron: exchangeDefaultPollCron,
+		weatherDefaultPollCron:  weatherDefaultPollCron,
+		weatherDefaultLocation:  weatherDefaultLocation,
+		log:                     log,
 	}
 }
 
@@ -183,6 +188,11 @@ func (h *Handler) writeListReminder(ctx context.Context, sb *strings.Builder, in
 		writeListRSSDetails(sb, r)
 	case r.Spec.Trigger == domain.TriggerThreshold && r.Spec.Event.Type == "price":
 		h.writeListPriceDetails(ctx, sb, r, loc)
+	case r.Spec.Trigger == domain.TriggerThreshold && r.Spec.Event.Type == "exchange_rate":
+		sb.WriteString("   • Условие: " + escapeMarkdown(metricConditionDescription(&r.Spec)) + "\n")
+		if line := formatCronLineRu(r.EvalCron); line != "" {
+			sb.WriteString("   • Расписание: " + escapeMarkdown(line) + "\n")
+		}
 	case r.Spec.Trigger == domain.TriggerAnchor && r.Spec.Event.Type == "tv_program":
 		writeListTVDetails(sb, r)
 	case r.EvalCron != "":
@@ -212,6 +222,10 @@ func listReminderTitle(r domain.Reminder) string {
 	case r.Spec.Trigger == domain.TriggerThreshold && r.Spec.Event.Type == "price":
 		if r.Spec.Event.Title != "" {
 			return "Цена: " + r.Spec.Event.Title
+		}
+	case r.Spec.Trigger == domain.TriggerThreshold && r.Spec.Event.Type == "exchange_rate":
+		if r.Spec.Event.Title != "" {
+			return "Курс: " + r.Spec.Event.Title
 		}
 	case r.Spec.Message != "":
 		return r.Spec.Message
@@ -1082,12 +1096,16 @@ func (h *Handler) askConfirmation(ctx context.Context, c tele.Context, userID in
 	applyWeatherDefaults(result, h.weatherDefaultLocation)
 	evalCron := result.EvalCron
 	if evalCron == "" && result.Spec != nil && result.Spec.Trigger == domain.TriggerThreshold {
-		if result.Spec.Event.Type == "weather" {
+		switch result.Spec.Event.Type {
+		case "weather":
 			evalCron = h.weatherDefaultPollCron
-		} else {
+		case "exchange_rate":
+			evalCron = h.exchangeDefaultPollCron
+		default:
 			evalCron = h.priceDefaultPollCron
 		}
 	}
+	result.EvalCron = evalCron
 	ctxData := &DialogContext{
 		RawText:    rawText,
 		Kind:       result.Kind,
@@ -1523,11 +1541,20 @@ func reminderIdemKey(rem *domain.Reminder) string {
 	case domain.KindConditional:
 		b.WriteString(rem.Spec.Event.Type)
 		b.WriteByte('|')
+		b.WriteString(string(rem.Spec.Trigger))
+		b.WriteByte('|')
 		b.WriteString(normalizeField(rem.Spec.Event.Title))
 		b.WriteByte('|')
 		b.WriteString(canonicalParams(rem.Spec.Event.Params))
 		b.WriteByte('|')
 		b.WriteString(rem.Spec.LeadTime.Duration.String())
+		b.WriteByte('|')
+		b.WriteString(strings.ToUpper(rem.Spec.Currency))
+		b.WriteByte('|')
+		if rem.Spec.Condition != nil {
+			conditionJSON, _ := json.Marshal(rem.Spec.Condition)
+			b.Write(conditionJSON)
+		}
 	case domain.KindAbsolute:
 		if rem.NextEvalAt != nil {
 			b.WriteString(rem.NextEvalAt.UTC().Format(time.RFC3339))
@@ -1628,6 +1655,22 @@ func validateParseResult(result *nlu.ParseResult) error {
 				if _, err := time.Parse("2006-01-02", day); err != nil {
 					return fmt.Errorf("invalid weather day %q", day)
 				}
+			}
+		case "exchange_rate":
+			if result.Spec.Trigger != domain.TriggerThreshold || result.Spec.Condition == nil {
+				return fmt.Errorf("exchange rate reminder requires a threshold condition")
+			}
+			params := result.Spec.Event.Params
+			assetType := strings.ToLower(params["asset_type"])
+			if assetType != "fiat" && assetType != "crypto" {
+				return fmt.Errorf("exchange rate reminder requires fiat or crypto asset_type")
+			}
+			if params["base"] == "" || params["quote"] == "" {
+				return fmt.Errorf("exchange rate reminder requires base and quote currencies")
+			}
+			metric := params["metric"]
+			if metric != "rate" && !(assetType == "crypto" && metric == "change_24h") {
+				return fmt.Errorf("exchange rate reminder has unsupported metric %q", metric)
 			}
 		default:
 			if result.Spec.Event.Title == "" {
@@ -1771,12 +1814,27 @@ func metricConditionDescription(spec *domain.Spec) string {
 		return "Уведомить при снижении цены"
 	}
 	condition := spec.Condition
+	if spec.Event.Type == "exchange_rate" && spec.Event.Params["metric"] == "change_24h" && condition.Target != nil {
+		percent := formatAbsScaled(*condition.Target, exchangerate.PercentScale, 2)
+		switch {
+		case *condition.Target < 0 && (condition.Operator == domain.ConditionOperatorLT || condition.Operator == domain.ConditionOperatorLTE):
+			return "Падение за 24 часа не меньше " + percent + "%"
+		case *condition.Target > 0 && (condition.Operator == domain.ConditionOperatorGT || condition.Operator == domain.ConditionOperatorGTE):
+			return "Рост за 24 часа не меньше " + percent + "%"
+		}
+	}
 	var reference string
 	if condition.Target != nil {
 		if spec.Event.Type == "price" {
 			reference = formatPriceRub(*condition.Target, spec.Currency)
 		} else if spec.Event.Type == "weather" {
 			reference = strconv.FormatFloat(float64(*condition.Target)/10, 'f', 1, 64) + " °C"
+		} else if spec.Event.Type == "exchange_rate" {
+			if spec.Event.Params["metric"] == "change_24h" {
+				reference = formatScaled(*condition.Target, exchangerate.PercentScale, 2) + "% за 24 часа"
+			} else {
+				reference = formatScaled(*condition.Target, exchangerate.RateScale, 6) + " " + strings.ToUpper(spec.Event.Params["quote"])
+			}
 		} else {
 			reference = strconv.FormatInt(*condition.Target, 10)
 		}
@@ -1802,6 +1860,18 @@ func metricConditionDescription(spec *domain.Spec) string {
 	default:
 		return "Условие метрики выполнено"
 	}
+}
+
+func formatScaled(value, scale int64, precision int) string {
+	formatted := strconv.FormatFloat(float64(value)/float64(scale), 'f', precision, 64)
+	formatted = strings.TrimRight(formatted, "0")
+	return strings.TrimRight(formatted, ".")
+}
+
+func formatAbsScaled(value, scale int64, precision int) string {
+	formatted := strconv.FormatFloat(math.Abs(float64(value))/float64(scale), 'f', precision, 64)
+	formatted = strings.TrimRight(formatted, "0")
+	return strings.TrimRight(formatted, ".")
 }
 
 func weatherDayDescription(day string) string {

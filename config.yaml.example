@@ -95,6 +95,20 @@ providers:
     #   0 9 * * *     — daily at 09:00 in the user's timezone
     poll_cron: "0 * * * *"
 
+  exchange_rate:
+    # Official Bank of Russia daily fiat-rate XML endpoint. Fiat cross-rates
+    # are derived from the published RUB rates.
+    cbr_url: https://www.cbr.ru/scripts/XML_daily.asp
+    # CoinGecko keyless Simple Price endpoint for cryptocurrency prices and
+    # rolling 24-hour percentage changes.
+    coingecko_url: https://api.coingecko.com/api/v3/simple/price
+    # Optional CoinGecko Demo API key. COINGECKO_API_KEY takes priority.
+    coingecko_api_key: "${COINGECKO_API_KEY}"
+    # Deadline for one Bank of Russia or CoinGecko request.
+    timeout: 10s
+    # Default check schedule (5-field cron, interpreted in the user's timezone).
+    poll_cron: "0 * * * *"
+
   travel:
     # Reserved for future live ticket integrations. Travel reminders are
     # currently disabled; these keys do not enable live searches yet.
