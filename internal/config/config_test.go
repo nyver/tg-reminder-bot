@@ -38,6 +38,30 @@ func TestLoadYAMLUsesSQLiteDefaults(t *testing.T) {
 	if cfg.Providers.ExchangeRate.CBRURL == "" || cfg.Providers.ExchangeRate.CoinGeckoURL == "" || cfg.Providers.ExchangeRate.PollCron != "0 * * * *" {
 		t.Fatalf("unexpected exchange rate config: %+v", cfg.Providers.ExchangeRate)
 	}
+	if cfg.Telegram.UI.MorningTime != "09:00" || cfg.Telegram.UI.DefaultSnoozeMinutes != 10 {
+		t.Fatalf("unexpected Telegram UI defaults: %+v", cfg.Telegram.UI)
+	}
+}
+
+func TestValidateTelegramUI(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(*Config)
+	}{
+		{"invalid morning", func(c *Config) { c.Telegram.UI.MorningTime = "morning" }},
+		{"partial quiet hours", func(c *Config) { c.Telegram.UI.QuietStart = "22:00" }},
+		{"invalid quiet end", func(c *Config) { c.Telegram.UI.QuietStart, c.Telegram.UI.QuietEnd = "22:00", "later" }},
+		{"invalid snooze", func(c *Config) { c.Telegram.UI.DefaultSnoozeMinutes = 0 }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := defaults()
+			tc.mutate(cfg)
+			if err := cfg.Validate(); err == nil {
+				t.Fatal("expected validation error")
+			}
+		})
+	}
 }
 
 func TestValidateRejectsInvalidProxyURLs(t *testing.T) {

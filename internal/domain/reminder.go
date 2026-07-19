@@ -28,10 +28,11 @@ const (
 type Status string
 
 const (
-	StatusActive Status = "active"
-	StatusPaused Status = "paused"
-	StatusDone   Status = "done"
-	StatusFailed Status = "failed"
+	StatusActive    Status = "active"
+	StatusPaused    Status = "paused"
+	StatusDone      Status = "done"
+	StatusCancelled Status = "cancelled"
+	StatusFailed    Status = "failed"
 )
 
 type Reminder struct {
@@ -46,6 +47,7 @@ type Reminder struct {
 	IdempotencyKey string
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
+	Version        int64
 	// UserTZ is populated by the scheduler at load time (not persisted).
 	UserTZ string
 }
@@ -151,27 +153,50 @@ type Observation struct {
 type NotificationStatus string
 
 const (
-	NotificationPending NotificationStatus = "pending"
-	NotificationSent    NotificationStatus = "sent"
-	NotificationFailed  NotificationStatus = "failed"
+	NotificationPending   NotificationStatus = "pending"
+	NotificationSent      NotificationStatus = "sent"
+	NotificationFailed    NotificationStatus = "failed"
+	NotificationCancelled NotificationStatus = "cancelled"
 )
 
 type ScheduledNotification struct {
-	ID             uuid.UUID
-	ReminderID     uuid.UUID
-	FireAt         time.Time
-	Text           string
-	IdempotencyKey string
-	Status         NotificationStatus
-	Attempts       int
-	CreatedAt      time.Time
-	SentAt         *time.Time
+	ID                   uuid.UUID
+	ReminderID           uuid.UUID
+	FireAt               time.Time
+	Text                 string
+	IdempotencyKey       string
+	Status               NotificationStatus
+	Attempts             int
+	CreatedAt            time.Time
+	SentAt               *time.Time
+	ParentNotificationID *uuid.UUID
 }
 
 type User struct {
 	ID        int64
 	TZ        string
 	CreatedAt time.Time
+}
+
+// UserPreferences contains Telegram UI defaults that are independent of the
+// user's timezone, which remains stored on User for backward compatibility.
+type UserPreferences struct {
+	UserID               int64
+	QuietStart           string
+	QuietEnd             string
+	MorningTime          string
+	DefaultSnoozeMinutes int
+	UpdatedAt            time.Time
+}
+
+// NotificationAction is an audit record for an idempotent inline action.
+type NotificationAction struct {
+	ID             uuid.UUID
+	NotificationID uuid.UUID
+	UserID         int64
+	Action         string
+	Payload        json.RawMessage
+	CreatedAt      time.Time
 }
 
 // DialogState — FSM-состояние диалога пользователя (переживает рестарты).
@@ -182,6 +207,7 @@ const (
 	DialogAwaitSpec    DialogState = "await_spec"
 	DialogAwaitConfirm DialogState = "await_confirm"
 	DialogAwaitField   DialogState = "await_field"
+	DialogAwaitEdit    DialogState = "await_edit"
 )
 
 type Dialog struct {

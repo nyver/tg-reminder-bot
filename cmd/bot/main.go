@@ -9,6 +9,7 @@ import (
 
 	"github.com/nyver2k/remindertgbot/internal/clock"
 	"github.com/nyver2k/remindertgbot/internal/config"
+	"github.com/nyver2k/remindertgbot/internal/domain"
 	"github.com/nyver2k/remindertgbot/internal/nlu"
 	"github.com/nyver2k/remindertgbot/internal/observability"
 	"github.com/nyver2k/remindertgbot/internal/provider"
@@ -48,8 +49,14 @@ func main() {
 
 	userRepo := postgres.NewUserRepo(db)
 	reminderRepo := postgres.NewReminderRepo(db)
+	notificationRepo := postgres.NewNotificationRepo(db)
 	observationRepo := postgres.NewObservationRepo(db)
 	dialogRepo := postgres.NewDialogRepo(db)
+	preferencesRepo := postgres.NewUserPreferencesRepo(db, domain.UserPreferences{
+		QuietStart: cfg.Telegram.UI.QuietStart, QuietEnd: cfg.Telegram.UI.QuietEnd,
+		MorningTime: cfg.Telegram.UI.MorningTime, DefaultSnoozeMinutes: cfg.Telegram.UI.DefaultSnoozeMinutes,
+	})
+	actionRepo := postgres.NewNotificationActionRepo(db)
 
 	fastPath := nlu.NewFastPath()
 	model := cfg.NLU.OpenRouter.Model
@@ -129,9 +136,12 @@ func main() {
 		evaluator.SetNewsRanker(ranker)
 	}
 
+	reminderService := telegram.NewReminderService(reminderRepo)
+	userService := telegram.NewUserService(userRepo)
+	preferencesService := telegram.NewUserPreferencesService(preferencesRepo)
 	handler := telegram.NewHandler(
-		telegram.NewReminderService(reminderRepo),
-		telegram.NewUserService(userRepo),
+		reminderService,
+		userService,
 		dialogRepo,
 		parser,
 		priceProber,
@@ -144,6 +154,9 @@ func main() {
 		cfg.Providers.Weather.DefaultLocation,
 		log,
 	)
+	handler.SetUIServices(preferencesService, telegram.NewNotificationActionService(
+		notificationRepo, actionRepo, reminderService, userService, preferencesService,
+	))
 
 	bot, err := telegram.NewBot(cfg.Telegram.Token, handler)
 	if err != nil {

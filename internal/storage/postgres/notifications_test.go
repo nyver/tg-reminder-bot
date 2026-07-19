@@ -79,7 +79,8 @@ func TestNotificationRepoLeasePendingNormalizesOffsetTimeToUTC(t *testing.T) {
 		locked_at DATETIME,
 		locked_by TEXT,
 		sent_at DATETIME,
-		created_at DATETIME NOT NULL
+		created_at DATETIME NOT NULL,
+		parent_notification_id TEXT
 	)`); err != nil {
 		t.Fatal(err)
 	}

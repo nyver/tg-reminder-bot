@@ -833,12 +833,12 @@ func TestMainMenuContainsQuickCommands(t *testing.T) {
 	}
 	got := []string{
 		menu.ReplyKeyboard[0][0].Text,
-		menu.ReplyKeyboard[0][1].Text,
 		menu.ReplyKeyboard[1][0].Text,
 		menu.ReplyKeyboard[1][1].Text,
 		menu.ReplyKeyboard[2][0].Text,
+		menu.ReplyKeyboard[2][1].Text,
 	}
-	want := []string{"/list", "/help", "/tv", "/rss", "/tz"}
+	want := []string{menuNew, menuList, menuToday, menuSettings, menuHelp}
 	for i := range want {
 		if got[i] != want[i] {
 			t.Fatalf("button %d = %q, want %q", i, got[i], want[i])

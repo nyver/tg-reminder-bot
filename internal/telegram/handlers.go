@@ -32,6 +32,9 @@ type ReminderService interface {
 	Cancel(ctx context.Context, userID int64, id uuid.UUID) error
 	Remove(ctx context.Context, userID int64, id uuid.UUID) error
 	Pause(ctx context.Context, userID int64, id uuid.UUID, pause bool) error
+	Finish(ctx context.Context, userID int64, id uuid.UUID) error
+	Update(ctx context.Context, rem *domain.Reminder, expectedVersion int64) error
+	Duplicate(ctx context.Context, userID int64, id uuid.UUID, now time.Time, timezone string) (*domain.Reminder, error)
 }
 
 // PriceHistory returns the last price observation for a reminder.
@@ -65,6 +68,15 @@ type Handler struct {
 	weatherDefaultPollCron  string
 	weatherDefaultLocation  string
 	log                     *slog.Logger
+	preferences             UserPreferencesService
+	notificationActions     NotificationActionService
+}
+
+// SetUIServices enables settings and notification callbacks. It is separate
+// from NewHandler to keep construction backward compatible for embedders.
+func (h *Handler) SetUIServices(preferences UserPreferencesService, actions NotificationActionService) {
+	h.preferences = preferences
+	h.notificationActions = actions
 }
 
 func NewHandler(
@@ -113,6 +125,7 @@ func (h *Handler) RegisterRoutes(bot *tele.Bot) {
 	bot.Handle("/tv", h.handleTV)
 	bot.Handle("/rss", h.handleRSS)
 	bot.Handle(tele.OnText, h.handleText)
+	bot.Handle(tele.OnCallback, h.handleCallback)
 	bot.Handle("\fconfirm_yes", h.handleConfirmYes)
 	bot.Handle("\fconfirm_no", h.handleConfirmNo)
 }
@@ -148,12 +161,7 @@ func (h *Handler) handleList(c tele.Context) error {
 		}
 	}
 
-	for _, message := range h.buildListMessages(ctx, rems, loc) {
-		if err := c.Send(message, tele.ModeMarkdownV2); err != nil {
-			return err
-		}
-	}
-	return nil
+	return c.Send(renderReminderCard(rems[0], loc), reminderCardMarkup(rems, 0), tele.ModeMarkdownV2)
 }
 
 func (h *Handler) buildListMessages(ctx context.Context, rems []domain.Reminder, loc *time.Location) []string {
@@ -310,6 +318,8 @@ func statusLabel(status domain.Status) string {
 		return "пауза"
 	case domain.StatusDone:
 		return "завершено"
+	case domain.StatusCancelled:
+		return "отменено"
 	case domain.StatusFailed:
 		return "ошибка"
 	default:
@@ -454,8 +464,6 @@ func (h *Handler) handleRefresh(c tele.Context) error {
 // per-day idempotency key a scheduled digest uses, and it never disturbs the
 // reminder's own NextEvalAt/cron progression.
 func (h *Handler) handleRun(c tele.Context) error {
-	ctx, cancel := context.WithTimeout(context.Background(), manualRunTimeout)
-	defer cancel()
 	args := strings.TrimSpace(c.Message().Payload)
 	if args == "" {
 		return c.Send("Укажите ID напоминания: `/run <id>`", tele.ModeMarkdown)
@@ -464,6 +472,12 @@ func (h *Handler) handleRun(c tele.Context) error {
 	if err != nil {
 		return c.Send("Неверный ID напоминания.")
 	}
+	return h.runNow(c, id)
+}
+
+func (h *Handler) runNow(c tele.Context, id uuid.UUID) error {
+	ctx, cancel := context.WithTimeout(context.Background(), manualRunTimeout)
+	defer cancel()
 	if h.evaluator == nil {
 		return c.Send("Принудительный запуск сейчас недоступен.")
 	}
@@ -974,6 +988,9 @@ func (h *Handler) handleText(c tele.Context) error {
 	defer cancel()
 	userID := c.Sender().ID
 	text := c.Text()
+	if handled, err := h.handleMenuText(c, text); handled {
+		return err
+	}
 
 	dialog, err := h.dialogs.Get(ctx, userID)
 	if err != nil {
@@ -1004,6 +1021,8 @@ func (h *Handler) handleText(c tele.Context) error {
 
 	case domain.DialogAwaitField:
 		return h.handleFieldInput(ctx, c, dialog, text)
+	case domain.DialogAwaitEdit:
+		return h.handleEditFieldInput(ctx, c, dialog, text)
 
 	default:
 		return h.startParsing(ctx, c, userID, text)
@@ -1058,6 +1077,7 @@ func (h *Handler) loadUserLocation(ctx context.Context, userID int64) (*time.Loc
 func (h *Handler) continueParsing(ctx context.Context, c tele.Context, userID int64, text string, result *nlu.ParseResult, userTZ string) error {
 	if len(result.Missing) > 0 {
 		ctxData := &DialogContext{
+			Mode:       "create",
 			RawText:    text,
 			Kind:       result.Kind,
 			ParsedSpec: mustMarshal(result.Spec),
@@ -1107,6 +1127,7 @@ func (h *Handler) askConfirmation(ctx context.Context, c tele.Context, userID in
 	}
 	result.EvalCron = evalCron
 	ctxData := &DialogContext{
+		Mode:       "create",
 		RawText:    rawText,
 		Kind:       result.Kind,
 		ParsedSpec: mustMarshal(result.Spec),
@@ -1128,14 +1149,7 @@ func (h *Handler) askConfirmation(ctx context.Context, c tele.Context, userID in
 	})
 
 	confirmMsg := fmt.Sprintf("*Создать напоминание?*\n\n%s", h.formatConfirmSpec(ctx, result))
-	menu := &tele.ReplyMarkup{}
-	menu.Inline(
-		menu.Row(
-			menu.Data("✅ Да, создать", "confirm_yes"),
-			menu.Data("✏️ Исправить", "confirm_no"),
-		),
-	)
-	return c.Send(confirmMsg, menu, tele.ModeMarkdownV2)
+	return c.Send(confirmMsg, draftPreviewMarkup(), tele.ModeMarkdownV2)
 }
 
 func applyWeatherDefaults(result *nlu.ParseResult, defaultLocation string) {
@@ -1998,9 +2012,9 @@ func mainMenu() *tele.ReplyMarkup {
 		Placeholder:    "Напишите напоминание или выберите команду",
 	}
 	menu.Reply(
-		menu.Row(menu.Text("/list"), menu.Text("/help")),
-		menu.Row(menu.Text("/tv"), menu.Text("/rss")),
-		menu.Row(menu.Text("/tz")),
+		menu.Row(menu.Text("➕ Новое напоминание")),
+		menu.Row(menu.Text("📋 Мои напоминания"), menu.Text("📅 Сегодня")),
+		menu.Row(menu.Text("⚙️ Настройки"), menu.Text("❓ Помощь")),
 	)
 	return menu
 }
@@ -2008,6 +2022,8 @@ func mainMenu() *tele.ReplyMarkup {
 const msgWelcome = `*Привет! Я бот напоминаний.*
 
 Просто напишите обычным текстом, что и когда нужно напомнить. Я уточню детали и попрошу подтвердить перед сохранением.
+
+Карточки напоминаний открываются кнопкой «📋 Мои напоминания». В них можно запускать, приостанавливать, изменять, дублировать, завершать и удалять напоминания без ввода ID.
 
 Например:
 • «напомни завтра в 9:00 позвонить маме»
@@ -2035,7 +2051,9 @@ const msgParseFailed = `Не удалось распознать напомин�
 
 const msgHelp = `*Что можно сделать*
 
-Напоминание можно создать без команды: просто отправьте текст, а я покажу черновик и попрошу подтверждение.
+Напоминание можно создать без команды: просто отправьте текст, а я покажу редактируемый черновик и попрошу подтверждение.
+
+Используйте меню для карточек напоминаний, списка на сегодня и настроек. Команды с ID сохранены для обратной совместимости.
 
 *Команды:*
 

@@ -27,6 +27,7 @@ func (r *ReminderRepo) Create(ctx context.Context, rem *domain.Reminder) error {
 	now := time.Now().UTC()
 	rem.CreatedAt = now
 	rem.UpdatedAt = now
+	rem.Version = 1
 
 	const q = `
 		INSERT INTO reminders
@@ -61,7 +62,7 @@ func (r *ReminderRepo) Create(ctx context.Context, rem *domain.Reminder) error {
 
 func (r *ReminderRepo) Get(ctx context.Context, id uuid.UUID) (*domain.Reminder, error) {
 	const q = `
-		SELECT id, user_id, kind, raw_text, spec, status, eval_cron, next_eval_at, created_at, updated_at
+		SELECT id, user_id, kind, raw_text, spec, status, eval_cron, next_eval_at, created_at, updated_at, version
 		FROM reminders WHERE id = $1`
 	row := r.db.QueryRowContext(ctx, r.db.Rebind(q), id.String())
 	rem, err := scanReminder(row)
@@ -73,8 +74,8 @@ func (r *ReminderRepo) Get(ctx context.Context, id uuid.UUID) (*domain.Reminder,
 
 func (r *ReminderRepo) ListByUser(ctx context.Context, userID int64) ([]domain.Reminder, error) {
 	const q = `
-		SELECT id, user_id, kind, raw_text, spec, status, eval_cron, next_eval_at, created_at, updated_at
-		FROM reminders WHERE user_id = $1 AND status != 'done'
+		SELECT id, user_id, kind, raw_text, spec, status, eval_cron, next_eval_at, created_at, updated_at, version
+		FROM reminders WHERE user_id = $1 AND status NOT IN ('done', 'cancelled')
 		ORDER BY created_at DESC`
 	rows, err := r.db.QueryContext(ctx, r.db.Rebind(q), userID)
 	if err != nil {
@@ -93,7 +94,7 @@ func (r *ReminderRepo) LeaseDue(ctx context.Context, workerID string, limit int)
 	now := r.db.Now()
 
 	selectQ := r.db.Rebind(`
-		SELECT id, user_id, kind, raw_text, spec, status, eval_cron, next_eval_at, created_at, updated_at
+		SELECT id, user_id, kind, raw_text, spec, status, eval_cron, next_eval_at, created_at, updated_at, version
 		FROM reminders
 		WHERE status = 'active' AND next_eval_at <= ` + now + `
 		  AND (locked_at IS NULL OR locked_at < ` + minutesAgo + `)
@@ -186,15 +187,29 @@ func (r *ReminderRepo) UpdateNextEval(ctx context.Context, id uuid.UUID, next *t
 
 func (r *ReminderRepo) UpdateStatus(ctx context.Context, id uuid.UUID, status domain.Status) error {
 	_, err := r.db.ExecContext(ctx,
-		r.db.Rebind(`UPDATE reminders SET status=$1, updated_at=$2 WHERE id=$3`),
+		r.db.Rebind(`UPDATE reminders SET status=$1, updated_at=$2, version=version+1 WHERE id=$3`),
 		string(status), time.Now().UTC(), id.String())
 	return err
 }
 
 func (r *ReminderRepo) Cancel(ctx context.Context, userID int64, id uuid.UUID) error {
-	res, err := r.db.ExecContext(ctx,
-		r.db.Rebind(`UPDATE reminders SET status='done', idempotency_key=NULL, updated_at=$1 WHERE id=$2 AND user_id=$3`),
-		time.Now().UTC(), id.String(), userID)
+	return r.setTerminalStatus(ctx, userID, id, domain.StatusCancelled)
+}
+
+// Finish marks a reminder completed while preserving it for audit/history.
+func (r *ReminderRepo) Finish(ctx context.Context, userID int64, id uuid.UUID) error {
+	return r.setTerminalStatus(ctx, userID, id, domain.StatusDone)
+}
+
+func (r *ReminderRepo) setTerminalStatus(ctx context.Context, userID int64, id uuid.UUID, status domain.Status) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck
+	res, err := tx.ExecContext(ctx,
+		r.db.Rebind(`UPDATE reminders SET status=$1, idempotency_key=NULL, updated_at=$2, version=version+1 WHERE id=$3 AND user_id=$4`),
+		string(status), time.Now().UTC(), id.String(), userID)
 	if err != nil {
 		return err
 	}
@@ -202,7 +217,10 @@ func (r *ReminderRepo) Cancel(ctx context.Context, userID int64, id uuid.UUID) e
 	if n == 0 {
 		return domain.ErrNotFound
 	}
-	return nil
+	if err := cancelPendingNotifications(ctx, tx, r.db, id); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // Remove permanently deletes a user's reminder and its dependent records.
@@ -252,8 +270,13 @@ func (r *ReminderRepo) Pause(ctx context.Context, userID int64, id uuid.UUID, pa
 	if pause {
 		status = domain.StatusPaused
 	}
-	res, err := r.db.ExecContext(ctx,
-		r.db.Rebind(`UPDATE reminders SET status=$1, updated_at=$2 WHERE id=$3 AND user_id=$4`),
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck
+	res, err := tx.ExecContext(ctx,
+		r.db.Rebind(`UPDATE reminders SET status=$1, updated_at=$2, version=version+1 WHERE id=$3 AND user_id=$4`),
 		string(status), time.Now().UTC(), id.String(), userID)
 	if err != nil {
 		return err
@@ -262,6 +285,75 @@ func (r *ReminderRepo) Pause(ctx context.Context, userID int64, id uuid.UUID, pa
 	if n == 0 {
 		return domain.ErrNotFound
 	}
+	if pause {
+		if err := cancelPendingNotifications(ctx, tx, r.db, id); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func cancelPendingNotifications(ctx context.Context, tx *sql.Tx, db *DB, reminderID uuid.UUID) error {
+	_, err := tx.ExecContext(ctx, db.Rebind(`
+		UPDATE scheduled_notifications
+		SET status='cancelled', locked_at=NULL, locked_by=NULL
+		WHERE reminder_id=$1 AND status='pending'`), reminderID.String())
+	return err
+}
+
+// Update atomically replaces a reminder when the caller's version is current.
+// Pending notifications are cancelled in the same transaction so the watcher
+// can recalculate delivery from the new next evaluation time.
+func (r *ReminderRepo) Update(ctx context.Context, rem *domain.Reminder, expectedVersion int64) error {
+	specJSON, err := json.Marshal(rem.Spec)
+	if err != nil {
+		return err
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	var evalCron *string
+	if rem.EvalCron != "" {
+		evalCron = &rem.EvalCron
+	}
+	now := time.Now().UTC()
+	res, err := tx.ExecContext(ctx, r.db.Rebind(`
+		UPDATE reminders
+		SET kind=$1, raw_text=$2, spec=$3, status=$4, eval_cron=$5,
+		    next_eval_at=$6, locked_at=NULL, locked_by=NULL, updated_at=$7,
+		    version=version+1, idempotency_key=NULL
+		WHERE id=$8 AND user_id=$9 AND version=$10`),
+		string(rem.Kind), rem.RawText, string(specJSON), string(rem.Status),
+		NullString(evalCron), NullTime(rem.NextEvalAt), now, rem.ID.String(), rem.UserID, expectedVersion)
+	if err != nil {
+		return err
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		var exists int
+		err = tx.QueryRowContext(ctx, r.db.Rebind(`SELECT 1 FROM reminders WHERE id=$1 AND user_id=$2`), rem.ID.String(), rem.UserID).Scan(&exists)
+		if errors.Is(err, sql.ErrNoRows) {
+			return domain.ErrNotFound
+		}
+		if err != nil {
+			return err
+		}
+		return domain.ErrConflict
+	}
+	if err := cancelPendingNotifications(ctx, tx, r.db, rem.ID); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	rem.Version = expectedVersion + 1
+	rem.UpdatedAt = now
 	return nil
 }
 
@@ -280,7 +372,7 @@ func scanReminder(row rowScanner) (*domain.Reminder, error) {
 	if err := row.Scan(
 		&idStr, &rem.UserID, &rem.Kind, &rem.RawText,
 		&specJSON, &rem.Status, &evalCron, &nextEvalAt,
-		&rem.CreatedAt, &rem.UpdatedAt,
+		&rem.CreatedAt, &rem.UpdatedAt, &rem.Version,
 	); err != nil {
 		return nil, err
 	}

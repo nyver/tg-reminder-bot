@@ -67,14 +67,38 @@ func (m *mockReminderStore) Get(ctx context.Context, id uuid.UUID) (*domain.Remi
 
 type mockSender struct{ err error }
 
-func (m *mockSender) Send(ctx context.Context, userID int64, text string) error {
+func (m *mockSender) Send(ctx context.Context, message OutboundMessage) error {
 	return m.err
 }
 
 type panicSender struct{}
 
-func (panicSender) Send(ctx context.Context, userID int64, text string) error {
+func (panicSender) Send(ctx context.Context, message OutboundMessage) error {
 	panic("boom")
+}
+
+func TestBuildOutboundMessageUsesReminderSpecificActions(t *testing.T) {
+	notification := domain.ScheduledNotification{ID: uuid.New(), Text: "message"}
+	cases := []struct {
+		name       string
+		reminder   domain.Reminder
+		wantAction string
+	}{
+		{"task", domain.Reminder{}, "done"},
+		{"threshold", domain.Reminder{Spec: domain.Spec{Trigger: domain.TriggerThreshold}}, "check"},
+		{"rss", domain.Reminder{Spec: domain.Spec{Trigger: domain.TriggerDigest, Event: domain.EventSpec{Type: "rss"}}}, "repeat"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			message := buildOutboundMessage(42, notification, tc.reminder)
+			if message.UserID != 42 || message.Text != "message" || len(message.Actions) == 0 || len(message.Actions[0]) == 0 {
+				t.Fatalf("message = %+v", message)
+			}
+			if message.Actions[0][0].Action != tc.wantAction || message.Actions[0][0].ID != notification.ID {
+				t.Fatalf("first action = %+v", message.Actions[0][0])
+			}
+		})
+	}
 }
 
 // TestDeliverSafeRecoversPanic guards against a regression where a panic

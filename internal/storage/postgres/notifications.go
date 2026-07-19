@@ -23,13 +23,18 @@ func (r *NotificationRepo) Enqueue(ctx context.Context, n *domain.ScheduledNotif
 		n.ID = uuid.New()
 	}
 	n.CreatedAt = time.Now().UTC()
+	var parentID *string
+	if n.ParentNotificationID != nil && *n.ParentNotificationID != uuid.Nil {
+		value := n.ParentNotificationID.String()
+		parentID = &value
+	}
 
 	_, err := r.db.ExecContext(ctx, r.db.Rebind(`
 		INSERT INTO scheduled_notifications
-			(id, reminder_id, fire_at, text, idempotency_key, status, attempts, created_at)
-		VALUES ($1,$2,$3,$4,$5,'pending',0,$6)
+			(id, reminder_id, fire_at, text, idempotency_key, status, attempts, created_at, parent_notification_id)
+		VALUES ($1,$2,$3,$4,$5,'pending',0,$6,$7)
 		ON CONFLICT (idempotency_key) DO NOTHING`),
-		n.ID.String(), n.ReminderID.String(), n.FireAt.UTC(), n.Text, n.IdempotencyKey, n.CreatedAt)
+		n.ID.String(), n.ReminderID.String(), n.FireAt.UTC(), n.Text, n.IdempotencyKey, n.CreatedAt, NullString(parentID))
 	return err
 }
 
@@ -42,7 +47,7 @@ func (r *NotificationRepo) LeasePending(ctx context.Context, workerID string, li
 	now := r.db.Now()
 
 	selectQ := r.db.Rebind(`
-		SELECT id, reminder_id, fire_at, text, idempotency_key, status, attempts, created_at, sent_at
+		SELECT id, reminder_id, fire_at, text, idempotency_key, status, attempts, created_at, sent_at, parent_notification_id
 		FROM scheduled_notifications
 		WHERE status = 'pending' AND fire_at <= ` + now + `
 		  AND (locked_at IS NULL OR locked_at < ` + minutesAgo + `)
@@ -121,7 +126,7 @@ func (r *NotificationRepo) ScheduleRetry(ctx context.Context, id uuid.UUID, atte
 
 func (r *NotificationRepo) ListFailed(ctx context.Context, limit int) ([]domain.ScheduledNotification, error) {
 	rows, err := r.db.QueryContext(ctx, r.db.Rebind(`
-		SELECT id, reminder_id, fire_at, text, idempotency_key, status, attempts, created_at, sent_at
+		SELECT id, reminder_id, fire_at, text, idempotency_key, status, attempts, created_at, sent_at, parent_notification_id
 		FROM scheduled_notifications WHERE status='failed'
 		ORDER BY created_at DESC LIMIT $1`), limit)
 	if err != nil {
@@ -149,14 +154,15 @@ func (r *NotificationRepo) Retry(ctx context.Context, id uuid.UUID) error {
 
 func (r *NotificationRepo) Get(ctx context.Context, id uuid.UUID) (*domain.ScheduledNotification, error) {
 	row := r.db.QueryRowContext(ctx, r.db.Rebind(`
-		SELECT id, reminder_id, fire_at, text, idempotency_key, status, attempts, created_at, sent_at
+		SELECT id, reminder_id, fire_at, text, idempotency_key, status, attempts, created_at, sent_at, parent_notification_id
 		FROM scheduled_notifications WHERE id=$1`), id.String())
 
 	var n domain.ScheduledNotification
 	var idStr, remIDStr string
 	var sentAt sql.NullTime
+	var parentID sql.NullString
 	err := row.Scan(&idStr, &remIDStr, &n.FireAt, &n.Text,
-		&n.IdempotencyKey, &n.Status, &n.Attempts, &n.CreatedAt, &sentAt)
+		&n.IdempotencyKey, &n.Status, &n.Attempts, &n.CreatedAt, &sentAt, &parentID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, domain.ErrNotFound
 	}
@@ -174,6 +180,13 @@ func (r *NotificationRepo) Get(ctx context.Context, id uuid.UUID) (*domain.Sched
 	n.ID = parsedID
 	n.ReminderID = remID
 	n.SentAt = PtrTime(sentAt)
+	if parentID.Valid {
+		parsed, err := parseUUID(parentID.String)
+		if err != nil {
+			return nil, fmt.Errorf("get parent notification: %w", err)
+		}
+		n.ParentNotificationID = &parsed
+	}
 	return &n, nil
 }
 
@@ -183,8 +196,9 @@ func scanNotifications(rows *sql.Rows) ([]domain.ScheduledNotification, error) {
 		var n domain.ScheduledNotification
 		var idStr, remIDStr string
 		var sentAt sql.NullTime
+		var parentID sql.NullString
 		if err := rows.Scan(&idStr, &remIDStr, &n.FireAt, &n.Text,
-			&n.IdempotencyKey, &n.Status, &n.Attempts, &n.CreatedAt, &sentAt); err != nil {
+			&n.IdempotencyKey, &n.Status, &n.Attempts, &n.CreatedAt, &sentAt, &parentID); err != nil {
 			return nil, err
 		}
 		id, err := parseUUID(idStr)
@@ -198,6 +212,13 @@ func scanNotifications(rows *sql.Rows) ([]domain.ScheduledNotification, error) {
 		n.ID = id
 		n.ReminderID = remID
 		n.SentAt = PtrTime(sentAt)
+		if parentID.Valid {
+			parent, err := parseUUID(parentID.String)
+			if err != nil {
+				return nil, fmt.Errorf("scan parent notification: %w", err)
+			}
+			n.ParentNotificationID = &parent
+		}
 		result = append(result, n)
 	}
 	return result, rows.Err()

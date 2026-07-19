@@ -27,7 +27,15 @@ type DatabaseConfig struct {
 }
 
 type TelegramConfig struct {
-	Token string `yaml:"token"`
+	Token string           `yaml:"token"`
+	UI    TelegramUIConfig `yaml:"ui"`
+}
+
+type TelegramUIConfig struct {
+	QuietStart           string `yaml:"quiet_start"`
+	QuietEnd             string `yaml:"quiet_end"`
+	MorningTime          string `yaml:"morning_time"`
+	DefaultSnoozeMinutes int    `yaml:"default_snooze_minutes"`
 }
 
 type NLUConfig struct {
@@ -191,6 +199,10 @@ func defaults() *Config {
 			Driver: "sqlite",
 			DSN:    "./data/remind.db",
 		},
+		Telegram: TelegramConfig{UI: TelegramUIConfig{
+			MorningTime:          "09:00",
+			DefaultSnoozeMinutes: 10,
+		}},
 		NLU: NLUConfig{
 			Provider: "openrouter",
 			Claude: ClaudeConfig{
@@ -304,6 +316,23 @@ func (cfg *Config) Validate() error {
 	}
 	if strings.TrimSpace(cfg.Database.DSN) == "" {
 		return fmt.Errorf("config: database.dsn is required")
+	}
+	if _, err := time.Parse("15:04", cfg.Telegram.UI.MorningTime); err != nil {
+		return fmt.Errorf("config: telegram.ui.morning_time must be HH:MM")
+	}
+	if (cfg.Telegram.UI.QuietStart == "") != (cfg.Telegram.UI.QuietEnd == "") {
+		return fmt.Errorf("config: telegram.ui quiet hours require both quiet_start and quiet_end")
+	}
+	if cfg.Telegram.UI.QuietStart != "" {
+		if _, err := time.Parse("15:04", cfg.Telegram.UI.QuietStart); err != nil {
+			return fmt.Errorf("config: telegram.ui.quiet_start must be HH:MM")
+		}
+		if _, err := time.Parse("15:04", cfg.Telegram.UI.QuietEnd); err != nil {
+			return fmt.Errorf("config: telegram.ui.quiet_end must be HH:MM")
+		}
+	}
+	if cfg.Telegram.UI.DefaultSnoozeMinutes < 1 || cfg.Telegram.UI.DefaultSnoozeMinutes > 10080 {
+		return fmt.Errorf("config: telegram.ui.default_snooze_minutes must be between 1 and 10080")
 	}
 	cfg.NLU.Provider = strings.ToLower(strings.TrimSpace(cfg.NLU.Provider))
 	if cfg.NLU.Provider != "claude" && cfg.NLU.Provider != "openrouter" {

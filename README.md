@@ -21,7 +21,7 @@ volume.
 | --- | --- |
 | `/start` | register the user and show a short help message |
 | `/help` | show the list of commands and reminder examples |
-| `/list` | list active and paused reminders with their IDs |
+| `/list` | open the interactive reminder cards |
 | `/cancel <id>` | cancel a reminder |
 | `/remove <id>` | permanently delete a reminder and its related data |
 | `/pause <id>` | temporarily pause a reminder |
@@ -36,19 +36,32 @@ volume.
 | `/rss <url> \| HH:MM` | same, with a custom delivery time |
 | `/rss <url> \| HH:MM \| N` | same, with a custom delivery time and item count (1–20) |
 
-IDs for `/cancel`, `/remove`, `/pause`, and `/resume` can be obtained with
-`/list`. `/cancel` marks the reminder `done` in the database, while `/remove`
-physically deletes it along with its notifications and observation history.
+The persistent keyboard provides the primary navigation: create a reminder,
+open reminder cards, show today's reminders, edit settings, or open help.
+Each reminder card has inline actions for run now, pause/resume, field-level
+editing, duplication, completion, and deletion, plus previous/next navigation.
+The cards never expose internal UUIDs.
+
+The UUID commands remain available for scripts and backward compatibility.
+`/cancel` marks a reminder `cancelled`, while `/remove` physically deletes it
+along with its notifications and observation history.
 
 Creating a reminder does not require a dedicated command: just send the bot a
 plain-text description. The bot recognizes the parameters, asks a
-clarifying question if needed, and offers a confirmation button before
-creating it.
+clarifying question if needed, and shows an editable preview before creating
+it. The preview can change text, date, time, recurrence, or condition without
+requiring the full request to be entered again.
 
-For smoother day-to-day use, `/start`, `/help`, and an empty `/list` show a
-small persistent Telegram keyboard with the most common commands. During
-confirmation the inline buttons are still available, but users can also reply
-with plain text such as `yes`, `no`, `да`, or `нет`.
+Delivered task notifications include Done and snooze actions (10 minutes, one
+hour, the configured default, or tomorrow morning). Threshold notifications
+can be checked again or paused, and RSS notifications can be generated again
+or paused. Callback payloads use a versioned, Base64URL-encoded protocol and
+are checked against the Telegram user before any mutation. Repeated button
+presses are idempotent.
+
+Dialog state, including edit prompts, is stored in the database and survives a
+bot restart. Existing text confirmation replies such as `yes`, `no`, `да`, or
+`нет` remain supported.
 
 Example messages (the bot's NLU understands Russian):
 
@@ -136,7 +149,7 @@ The full example is in `config.yaml.example`. The applications read
 Main YAML sections:
 
 - `database` — database driver and DSN;
-- `telegram` — Telegram token;
+- `telegram` — Telegram token and defaults for Telegram UI preferences;
 - `nlu` — LLM provider, key, and model;
 - `providers` — external source settings;
 - `scheduler` — background task intervals;
@@ -145,6 +158,25 @@ Main YAML sections:
 The `providers.travel` fields are reserved for a future live ticket
 integration. Travel reminders are currently rejected; the bot never returns
 sample or fabricated ticket offers.
+
+`telegram.ui` defines defaults copied when a user first opens settings:
+
+| Field | Purpose | Default |
+| --- | --- | --- |
+| `quiet_start`, `quiet_end` | silent-delivery interval in `HH:MM`; leave both empty to disable | empty |
+| `morning_time` | local time used by “Tomorrow morning” | `09:00` |
+| `default_snooze_minutes` | custom snooze duration, from 1 minute through 7 days | `10` |
+
+Users can change the timezone, quiet hours, morning time, and default snooze
+directly through **Settings**. Quiet hours silence Telegram notifications; they
+do not delay or discard them.
+
+After upgrading, run `remindctl migrate up` before starting the bot and worker.
+Schema versions `0006`–`0008` add notification action audit/idempotency,
+optimistic reminder versions and snooze parent links, user UI preferences, and
+reserved short-lived UI tokens. Both SQLite and PostgreSQL migrations are
+included; the numbering continues the migrations already present in this
+repository.
 
 At `server.log_level: info`, LLM calls are logged with the component
 (`nlu_parser` or `news_ranker`), provider, selected model, and whether the

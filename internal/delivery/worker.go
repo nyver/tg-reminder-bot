@@ -39,6 +39,12 @@ type Worker struct {
 	workerID      string
 	tick          time.Duration
 	log           *slog.Logger
+	quiet         QuietModeResolver
+}
+
+// QuietModeResolver applies per-user quiet hours at delivery time.
+type QuietModeResolver interface {
+	IsQuiet(ctx context.Context, userID int64, at time.Time) (bool, error)
 }
 
 func NewWorker(
@@ -58,6 +64,9 @@ func NewWorker(
 		log:           log,
 	}
 }
+
+// SetQuietModeResolver enables user-specific silent Telegram delivery.
+func (w *Worker) SetQuietModeResolver(resolver QuietModeResolver) { w.quiet = resolver }
 
 func (w *Worker) Run(ctx context.Context) error {
 	ticker := time.NewTicker(w.tick)
@@ -138,7 +147,15 @@ func (w *Worker) deliver(ctx context.Context, n domain.ScheduledNotification) {
 		return
 	}
 
-	if err := w.sender.Send(ctx, rem.UserID, n.Text); err != nil {
+	message := buildOutboundMessage(rem.UserID, n, *rem)
+	if w.quiet != nil {
+		if quiet, quietErr := w.quiet.IsQuiet(ctx, rem.UserID, time.Now()); quietErr == nil {
+			message.Quiet = quiet
+		} else {
+			w.log.Warn("resolve quiet mode", "user_id", rem.UserID, "err", quietErr)
+		}
+	}
+	if err := w.sender.Send(ctx, message); err != nil {
 		w.log.Warn("send failed", "notification_id", n.ID, "attempt", n.Attempts+1, "err", err)
 		w.retry(ctx, n)
 		return
@@ -149,6 +166,26 @@ func (w *Worker) deliver(ctx context.Context, n domain.ScheduledNotification) {
 	}
 	observability.NotificationsSentTotal.Inc()
 	w.log.Info("notification sent", "notification_id", n.ID, "user_id", rem.UserID)
+}
+
+func buildOutboundMessage(userID int64, notification domain.ScheduledNotification, reminder domain.Reminder) OutboundMessage {
+	action := func(text, name string) OutboundAction {
+		return OutboundAction{Text: text, Entity: "notification", Action: name, ID: notification.ID}
+	}
+	message := OutboundMessage{UserID: userID, Text: notification.Text}
+	switch {
+	case reminder.Spec.Trigger == domain.TriggerThreshold:
+		message.Actions = [][]OutboundAction{{action("🔄 Проверить снова", "check"), action("⏸ Пауза", "pause")}}
+	case reminder.Spec.Trigger == domain.TriggerDigest && reminder.Spec.Event.Type == "rss":
+		message.Actions = [][]OutboundAction{{action("▶ Создать ещё раз", "repeat"), action("⏸ Пауза", "pause")}}
+	default:
+		message.Actions = [][]OutboundAction{
+			{action("✅ Выполнено", "done")},
+			{action("Через 10 минут", "snooze_10"), action("Через час", "snooze_60")},
+			{action("Отложить", "snooze_default"), action("Завтра утром", "snooze_morning")},
+		}
+	}
+	return message
 }
 
 func backoffDuration(attempt int) time.Duration {

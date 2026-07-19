@@ -12,6 +12,7 @@ import (
 	"github.com/nyver2k/remindertgbot/internal/clock"
 	"github.com/nyver2k/remindertgbot/internal/config"
 	"github.com/nyver2k/remindertgbot/internal/delivery"
+	"github.com/nyver2k/remindertgbot/internal/domain"
 	"github.com/nyver2k/remindertgbot/internal/nlu"
 	"github.com/nyver2k/remindertgbot/internal/observability"
 	"github.com/nyver2k/remindertgbot/internal/provider"
@@ -54,6 +55,11 @@ func main() {
 	reminderRepo := postgres.NewReminderRepo(db)
 	notifRepo := postgres.NewNotificationRepo(db)
 	obsRepo := postgres.NewObservationRepo(db)
+	userService := telegram.NewUserService(postgres.NewUserRepo(db))
+	preferencesService := telegram.NewUserPreferencesService(postgres.NewUserPreferencesRepo(db, domain.UserPreferences{
+		QuietStart: cfg.Telegram.UI.QuietStart, QuietEnd: cfg.Telegram.UI.QuietEnd,
+		MorningTime: cfg.Telegram.UI.MorningTime, DefaultSnoozeMinutes: cfg.Telegram.UI.DefaultSnoozeMinutes,
+	}))
 
 	// Wire providers.
 	var iptvxRunner func(context.Context) error
@@ -141,6 +147,7 @@ func main() {
 
 	// Delivery worker.
 	deliveryWorker := delivery.NewWorker(notifRepo, reminderRepo, sender, workerID, cfg.Scheduler.DeliveryTick, log)
+	deliveryWorker.SetQuietModeResolver(telegram.NewQuietModeService(userService, preferencesService))
 
 	janitor := scheduler.NewJanitor(
 		postgres.NewHousekeepingRepo(db),

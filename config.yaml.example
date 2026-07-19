@@ -13,8 +13,14 @@ database:
 telegram:
   # Token from BotFather. A non-empty TELEGRAM_TOKEN overrides this field.
   token: "${TELEGRAM_TOKEN}"
-  # The bot shows a persistent quick-command keyboard in Telegram clients.
-  # No extra configuration is required; users can still type free-form text.
+  # Defaults copied to a user's editable Telegram UI preferences on first use.
+  ui:
+    # Leave both quiet-hour values empty to disable silent delivery by default.
+    quiet_start: ""
+    quiet_end: ""
+    morning_time: "09:00"
+    # Allowed range: 1 minute through 7 days (10080 minutes).
+    default_snooze_minutes: 10
 
 nlu:
   # Free-form dates and times are interpreted in the per-user IANA timezone

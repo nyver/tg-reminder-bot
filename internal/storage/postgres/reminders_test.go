@@ -183,7 +183,8 @@ func TestReminderRepoLeaseDueNormalizesOffsetTimeToUTC(t *testing.T) {
 			locked_at DATETIME,
 			locked_by TEXT,
 			created_at DATETIME NOT NULL,
-			updated_at DATETIME NOT NULL
+			updated_at DATETIME NOT NULL,
+			version INTEGER NOT NULL DEFAULT 1
 		);
 		CREATE UNIQUE INDEX idx_reminders_idempotency
 			ON reminders (idempotency_key) WHERE idempotency_key IS NOT NULL;`

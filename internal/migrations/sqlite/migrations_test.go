@@ -62,4 +62,14 @@ func TestNormalizeScheduledTimesUTC(t *testing.T) {
 	if fireAt != want {
 		t.Fatalf("fire_at = %q, want %q", fireAt, want)
 	}
+	for _, table := range []string{"notification_actions", "user_ui_preferences", "ui_tokens"} {
+		var name string
+		if err := db.QueryRowContext(ctx, `SELECT name FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&name); err != nil {
+			t.Fatalf("UI table %s missing: %v", table, err)
+		}
+	}
+	var version int
+	if err := db.QueryRowContext(ctx, `SELECT version FROM reminders WHERE id=?`, reminderID).Scan(&version); err != nil || version != 1 {
+		t.Fatalf("reminder version = %d, err=%v", version, err)
+	}
 }

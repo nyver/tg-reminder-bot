@@ -76,11 +76,11 @@ func (r *HousekeepingRepo) PruneExpiredCache(ctx context.Context) (int64, error)
 	return res.RowsAffected()
 }
 
-// PruneDoneReminders deletes reminders with status='done' whose updated_at is
-// older than retentionDays. Cascades to scheduled_notifications and observations.
+// PruneDoneReminders deletes completed or cancelled reminders older than
+// retentionDays. Cascades to scheduled_notifications and observations.
 func (r *HousekeepingRepo) PruneDoneReminders(ctx context.Context, retentionDays int) (int64, error) {
 	q := `DELETE FROM reminders
-	      WHERE status = 'done'
+	      WHERE status IN ('done', 'cancelled')
 	        AND updated_at < ` + r.db.DaysAgo(retentionDays)
 	res, err := r.db.ExecContext(ctx, q)
 	if err != nil {
