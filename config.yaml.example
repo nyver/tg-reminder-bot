@@ -116,6 +116,8 @@ providers:
     proxy_url: ""
 
 scheduler:
+  # Cron times are interpreted in each user's timezone configured via /tz.
+  # The VPS or container timezone does not affect reminder delivery.
   # Interval for finding reminders that are due for evaluation.
   watcher_tick: 1m
   # Interval for delivering prepared Telegram notifications.

@@ -135,3 +135,70 @@ func TestMarkConditionalDueSkipsDigestReminders(t *testing.T) {
 		t.Fatalf("digest locked_by still set: %q", digestLocked.String)
 	}
 }
+
+func TestReminderRepoLeaseDueNormalizesOffsetTimeToUTC(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db, err := New(ctx, "sqlite", filepath.Join(t.TempDir(), "utc-reminder.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	schema := `
+		CREATE TABLE users (
+			id INTEGER PRIMARY KEY,
+			tz TEXT NOT NULL
+		);
+		CREATE TABLE reminders (
+			id TEXT PRIMARY KEY,
+			user_id INTEGER NOT NULL,
+			kind TEXT NOT NULL,
+			raw_text TEXT NOT NULL,
+			spec TEXT NOT NULL,
+			status TEXT NOT NULL,
+			eval_cron TEXT,
+			next_eval_at DATETIME,
+			idempotency_key TEXT,
+			locked_at DATETIME,
+			locked_by TEXT,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL
+		);
+		CREATE UNIQUE INDEX idx_reminders_idempotency
+			ON reminders (idempotency_key) WHERE idempotency_key IS NOT NULL;`
+	if _, err := db.ExecContext(ctx, schema); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO users (id, tz) VALUES (42, 'Europe/Moscow')`); err != nil {
+		t.Fatal(err)
+	}
+
+	moscow := time.FixedZone("MSK", 3*60*60)
+	due := time.Now().Add(-time.Minute).In(moscow)
+	rem := &domain.Reminder{
+		UserID:         42,
+		Kind:           domain.KindConditional,
+		RawText:        "RSS digest",
+		Spec:           domain.Spec{Trigger: domain.TriggerDigest, Event: domain.EventSpec{Type: "rss"}},
+		Status:         domain.StatusActive,
+		EvalCron:       "0 18 * * *",
+		NextEvalAt:     &due,
+		IdempotencyKey: uuid.NewString(),
+	}
+	repo := NewReminderRepo(db)
+	if err := repo.Create(ctx, rem); err != nil {
+		t.Fatal(err)
+	}
+
+	leased, err := repo.LeaseDue(ctx, "worker-1", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(leased) != 1 {
+		t.Fatalf("leased reminders = %d, want 1; offset time was not stored as UTC", len(leased))
+	}
+	if leased[0].NextEvalAt == nil || !leased[0].NextEvalAt.Equal(due) {
+		t.Fatalf("next_eval_at = %v, want instant %v", leased[0].NextEvalAt, due)
+	}
+}

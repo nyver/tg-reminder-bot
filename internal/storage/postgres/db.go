@@ -144,7 +144,7 @@ func NullTime(t *time.Time) sql.NullTime {
 	if t == nil {
 		return sql.NullTime{}
 	}
-	return sql.NullTime{Time: *t, Valid: true}
+	return sql.NullTime{Time: t.UTC(), Valid: true}
 }
 
 // PtrString converts sql.NullString to *string.

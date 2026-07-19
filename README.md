@@ -375,6 +375,10 @@ given, it defaults to top 10. `/list`, `/pause`, `/resume`, `/cancel`, and
 `/remove` manage an RSS digest reminder the same way as any other
 conditional reminder.
 
+Digest times are interpreted in the user's timezone configured with `/tz`
+(`Europe/Moscow` by default). The VPS, container, and database timezone do
+not affect delivery time.
+
 To generate a digest immediately instead of waiting for its scheduled time,
 use `/run <id>` with the ID from `/list`:
 

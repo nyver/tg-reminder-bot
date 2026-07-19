@@ -29,7 +29,7 @@ func (r *NotificationRepo) Enqueue(ctx context.Context, n *domain.ScheduledNotif
 			(id, reminder_id, fire_at, text, idempotency_key, status, attempts, created_at)
 		VALUES ($1,$2,$3,$4,$5,'pending',0,$6)
 		ON CONFLICT (idempotency_key) DO NOTHING`),
-		n.ID.String(), n.ReminderID.String(), n.FireAt, n.Text, n.IdempotencyKey, n.CreatedAt)
+		n.ID.String(), n.ReminderID.String(), n.FireAt.UTC(), n.Text, n.IdempotencyKey, n.CreatedAt)
 	return err
 }
 
@@ -115,7 +115,7 @@ func (r *NotificationRepo) ScheduleRetry(ctx context.Context, id uuid.UUID, atte
 		UPDATE scheduled_notifications
 		SET attempts=$1, fire_at=$2, locked_at=NULL, locked_by=NULL
 		WHERE id=$3`),
-		attempts, fireAt, id.String())
+		attempts, fireAt.UTC(), id.String())
 	return err
 }
 
