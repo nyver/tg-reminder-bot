@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -25,10 +24,19 @@ const (
 	maxDownloadSize = 512 << 20 // 512 MB
 )
 
+// EPGWriter receives EPG rows one at a time during a streaming import.
+type EPGWriter interface {
+	AddChannel(ch EPGChannel) error
+	AddProgramme(p EPGProgramme) error
+}
+
 // EPGStore persists and queries imported EPG data.
 type EPGStore interface {
 	// ImportEPG atomically replaces all EPG data (delete-all + insert-new).
-	ImportEPG(ctx context.Context, channels []EPGChannel, progs []EPGProgramme) error
+	// fill is invoked inside the import transaction and streams rows into the
+	// writer, so the full EPG is never held in memory. A non-nil error from
+	// fill aborts the import and keeps the previous data.
+	ImportEPG(ctx context.Context, fill func(EPGWriter) error) error
 	// Channels returns all channels (for fuzzy name matching).
 	Channels(ctx context.Context) ([]EPGChannel, error)
 	// Programmes returns programmes for channelID in [from, to).
@@ -289,26 +297,27 @@ func (p *Provider) importFile(ctx context.Context) error {
 	}
 	defer closer()
 
-	channels, progs, parseErrs, err := parseXMLTV(r)
+	var res parseResult
+	err = p.store.ImportEPG(ctx, func(w EPGWriter) error {
+		var parseErr error
+		res, parseErr = parseXMLTV(ctx, r, w)
+		return parseErr
+	})
 	if err != nil {
-		return fmt.Errorf("iptvx: parse: %w", err)
+		return fmt.Errorf("iptvx: import: %w", err)
 	}
-	if parseErrs > 0 {
-		p.log.Warn("iptvx: some EPG elements failed to decode", "skipped", parseErrs)
-	}
-
-	if err := p.store.ImportEPG(ctx, channels, progs); err != nil {
-		return fmt.Errorf("iptvx: db import: %w", err)
+	if res.parseErrs > 0 {
+		p.log.Warn("iptvx: some EPG elements failed to decode", "skipped", res.parseErrs)
 	}
 
 	p.chMu.Lock()
-	p.channels = channels
+	p.channels = res.channels
 	p.chMu.Unlock()
 
 	p.log.Info("iptvx: EPG imported",
-		"channels", len(channels),
-		"programmes", len(progs),
-		"parse_errors", parseErrs)
+		"channels", len(res.channels),
+		"programmes", res.programmes,
+		"parse_errors", res.parseErrs)
 	return nil
 }
 
@@ -426,21 +435,28 @@ func (p xmlProg) desc() string {
 	return ""
 }
 
-// parseXMLTV streams the XMLTV document without loading the full tree into memory.
-// Returns the number of elements that failed to decode alongside the parsed data.
-func parseXMLTV(r io.Reader) ([]EPGChannel, []EPGProgramme, int, error) {
-	var channels []EPGChannel
-	var progs []EPGProgramme
-	var parseErrs int
+// parseResult summarises a parseXMLTV run. Channels are kept because the list
+// is small and feeds the in-memory fuzzy-matching cache; programmes are only
+// counted since they are streamed straight to the writer.
+type parseResult struct {
+	channels   []EPGChannel
+	programmes int
+	parseErrs  int
+}
+
+// parseXMLTV streams the XMLTV document into w element by element, so memory
+// use stays constant regardless of the EPG size.
+func parseXMLTV(ctx context.Context, r io.Reader, w EPGWriter) (parseResult, error) {
+	var res parseResult
 	dec := xml.NewDecoder(r)
 
 	for {
 		tok, err := dec.Token()
 		if errors.Is(err, io.EOF) {
-			break
+			return res, nil
 		}
 		if err != nil {
-			return nil, nil, parseErrs, err
+			return res, err
 		}
 
 		se, ok := tok.(xml.StartElement)
@@ -452,20 +468,22 @@ func parseXMLTV(r io.Reader) ([]EPGChannel, []EPGProgramme, int, error) {
 		case "channel":
 			var xc xmlChannel
 			if err := dec.DecodeElement(&xc, &se); err != nil {
-				parseErrs++
+				res.parseErrs++
 				continue
 			}
-			if xc.ID != "" {
-				channels = append(channels, EPGChannel{
-					ID:          xc.ID,
-					DisplayName: xc.displayName(),
-				})
+			if xc.ID == "" {
+				continue
 			}
+			ch := EPGChannel{ID: xc.ID, DisplayName: xc.displayName()}
+			if err := w.AddChannel(ch); err != nil {
+				return res, err
+			}
+			res.channels = append(res.channels, ch)
 
 		case "programme":
 			var xp xmlProg
 			if err := dec.DecodeElement(&xp, &se); err != nil {
-				parseErrs++
+				res.parseErrs++
 				continue
 			}
 			title := xp.title()
@@ -480,21 +498,24 @@ func parseXMLTV(r io.Reader) ([]EPGChannel, []EPGProgramme, int, error) {
 			if xp.Stop != "" {
 				stop, _ = parseXMLTVTime(xp.Stop)
 			}
-			progs = append(progs, EPGProgramme{
+			if err := w.AddProgramme(EPGProgramme{
 				ChannelID: xp.Channel,
 				Title:     title,
 				StartsAt:  start,
 				EndsAt:    stop,
 				Desc:      xp.desc(),
-			})
+			}); err != nil {
+				return res, err
+			}
+			res.programmes++
+			// Imports of large feeds take a while; honour shutdown promptly.
+			if res.programmes%1000 == 0 {
+				if err := ctx.Err(); err != nil {
+					return res, err
+				}
+			}
 		}
 	}
-
-	sort.Slice(progs, func(i, j int) bool {
-		return progs[i].StartsAt.Before(progs[j].StartsAt)
-	})
-
-	return channels, progs, parseErrs, nil
 }
 
 func parseXMLTVTime(s string) (time.Time, bool) {

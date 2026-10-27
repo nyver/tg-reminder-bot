@@ -26,11 +26,32 @@ type memStore struct {
 	imports  int
 }
 
-func (m *memStore) ImportEPG(_ context.Context, channels []EPGChannel, progs []EPGProgramme) error {
+// memWriter collects streamed rows; memStore swaps them in only on success,
+// mirroring the transactional semantics of the real store.
+type memWriter struct {
+	channels []EPGChannel
+	progs    []EPGProgramme
+}
+
+func (w *memWriter) AddChannel(ch EPGChannel) error {
+	w.channels = append(w.channels, ch)
+	return nil
+}
+
+func (w *memWriter) AddProgramme(p EPGProgramme) error {
+	w.progs = append(w.progs, p)
+	return nil
+}
+
+func (m *memStore) ImportEPG(_ context.Context, fill func(EPGWriter) error) error {
+	w := &memWriter{}
+	if err := fill(w); err != nil {
+		return err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.channels = channels
-	m.progs = progs
+	m.channels = w.channels
+	m.progs = w.progs
 	m.imports++
 	return nil
 }

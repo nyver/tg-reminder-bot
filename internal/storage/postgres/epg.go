@@ -16,10 +16,11 @@ type EPGRepo struct{ db *DB }
 
 func NewEPGRepo(db *DB) *EPGRepo { return &EPGRepo{db: db} }
 
-// ImportEPG atomically replaces all EPG data: truncates both tables then
-// inserts the new channels and programmes in a single transaction.
-// Using multi-row INSERT batches for efficiency (avoids N round-trips).
-func (r *EPGRepo) ImportEPG(ctx context.Context, channels []iptvx.EPGChannel, progs []iptvx.EPGProgramme) error {
+// ImportEPG atomically replaces all EPG data: clears both tables, then lets
+// fill stream the new channels and programmes into a batching writer inside a
+// single transaction. Only one batch is buffered at a time, so memory use does
+// not grow with the EPG size.
+func (r *EPGRepo) ImportEPG(ctx context.Context, fill func(iptvx.EPGWriter) error) error {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -33,14 +34,70 @@ func (r *EPGRepo) ImportEPG(ctx context.Context, channels []iptvx.EPGChannel, pr
 		return fmt.Errorf("epg: clear channels: %w", err)
 	}
 
-	if err := insertChannels(ctx, tx, r.db, channels); err != nil {
-		return fmt.Errorf("epg: insert channels: %w", err)
+	w := &epgBatchWriter{ctx: ctx, tx: tx, db: r.db}
+	if err := fill(w); err != nil {
+		return err
 	}
-	if err := insertProgrammes(ctx, tx, r.db, progs); err != nil {
-		return fmt.Errorf("epg: insert programmes: %w", err)
+	if err := w.flush(); err != nil {
+		return err
 	}
 
 	return tx.Commit()
+}
+
+// epgBatchWriter buffers up to epgBatchSize rows per table and flushes them
+// with multi-row INSERTs. It lives only for the duration of one ImportEPG call.
+type epgBatchWriter struct {
+	ctx      context.Context
+	tx       *sql.Tx
+	db       *DB
+	channels []iptvx.EPGChannel
+	progs    []iptvx.EPGProgramme
+}
+
+func (w *epgBatchWriter) AddChannel(ch iptvx.EPGChannel) error {
+	w.channels = append(w.channels, ch)
+	if len(w.channels) >= epgBatchSize {
+		return w.flushChannels()
+	}
+	return nil
+}
+
+func (w *epgBatchWriter) AddProgramme(p iptvx.EPGProgramme) error {
+	w.progs = append(w.progs, p)
+	if len(w.progs) >= epgBatchSize {
+		return w.flushProgrammes()
+	}
+	return nil
+}
+
+func (w *epgBatchWriter) flush() error {
+	if err := w.flushChannels(); err != nil {
+		return err
+	}
+	return w.flushProgrammes()
+}
+
+func (w *epgBatchWriter) flushChannels() error {
+	if len(w.channels) == 0 {
+		return nil
+	}
+	if err := insertChannels(w.ctx, w.tx, w.db, w.channels); err != nil {
+		return fmt.Errorf("epg: insert channels: %w", err)
+	}
+	w.channels = w.channels[:0]
+	return nil
+}
+
+func (w *epgBatchWriter) flushProgrammes() error {
+	if len(w.progs) == 0 {
+		return nil
+	}
+	if err := insertProgrammes(w.ctx, w.tx, w.db, w.progs); err != nil {
+		return fmt.Errorf("epg: insert programmes: %w", err)
+	}
+	w.progs = w.progs[:0]
+	return nil
 }
 
 // Channels returns all EPG channels (used for fuzzy name matching in the provider).
